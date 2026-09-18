@@ -4493,6 +4493,9 @@ slavecoord:             DO l = 1, 4
             !$acc enter data copyin(self % elements(eID) % storage % Q_grad) ! Gradient variables to calculate the gradient
          end if
 #endif
+#ifdef NAVIERSTOKES
+         !$acc enter data copyin(self % elements(eID) % storage % AviscContravariantFlux) !Shock-capturing artificial viscous flux
+#endif
 #ifdef CAHNHILLIARD
          !$acc enter data copyin(self % elements(eID) % storage % c)     ! CHE concentration
          !$acc enter data copyin(self % elements(eID) % storage % cDot)  ! CHE concentration time derivative
@@ -4549,6 +4552,10 @@ slavecoord:             DO l = 1, 4
          !$acc enter data copyin(self % faces(iFace) % storage(2) % unStar)
          !$acc enter data copyin(self % faces(iFace) % storage(1) % rho)
          !$acc enter data copyin(self % faces(iFace) % storage(2) % rho)
+#ifdef NAVIERSTOKES
+         !$acc enter data copyin(self % faces(iFace) % storage(1) % AviscFlux) !Shock-capturing artificial viscous flux
+         !$acc enter data copyin(self % faces(iFace) % storage(2) % AviscFlux) !Shock-capturing artificial viscous flux
+#endif
          !$acc enter data copyin(self % faces(iFace) % geom)
          !$acc enter data copyin(self % faces(iFace) % geom % x)
          !$acc enter data copyin(self % faces(iFace) % geom % h)
@@ -4678,6 +4685,9 @@ slavecoord:             DO l = 1, 4
             !$acc exit data delete(self % elements(eID) % storage % Q_grad) ! Gradient variables to calculate the gradient
          end if
 #endif
+#ifdef NAVIERSTOKES
+         !$acc exit data delete(self % elements(eID) % storage % AviscContravariantFlux) !Shock-capturing artificial viscous flux
+#endif
 #ifdef CAHNHILLIARD
          !$acc exit data delete(self % elements(eID) % storage % c)     ! CHE concentration
          !$acc exit data delete(self % elements(eID) % storage % cDot)  ! CHE concentration time derivative
@@ -4725,6 +4735,10 @@ slavecoord:             DO l = 1, 4
          !$acc exit data delete(self % faces(iFace) % storage(2) % unStar)
          !$acc exit data delete(self % faces(iFace) % storage(1) % rho)
          !$acc exit data delete(self % faces(iFace) % storage(2) % rho)
+#ifdef NAVIERSTOKES
+         !$acc exit data delete(self % faces(iFace) % storage(1) % AviscFlux) !Shock-capturing artificial viscous flux
+         !$acc exit data delete(self % faces(iFace) % storage(2) % AviscFlux) !Shock-capturing artificial viscous flux
+#endif
          !$acc exit data delete(self % faces(iFace) % storage)
          !$acc exit data delete(self % faces(iFace) % geom % x)
          !$acc exit data delete(self % faces(iFace) % geom % h)
