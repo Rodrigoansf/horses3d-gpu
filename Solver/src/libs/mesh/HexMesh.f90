@@ -99,6 +99,7 @@ MODULE HexMeshClass
             procedure :: CreateDeviceData              => HexMesh_CreateDeviceData
             procedure :: ExitDeviceData                => HexMesh_ExitDeviceData
             procedure :: UpdateHostData                => HexMesh_UpdateHostData
+            procedure :: UpdateDeviceSolution          => HexMesh_UpdateDeviceSolution
             procedure :: UpdateFacesHostData           => HexMesh_UpdateFacesHostData
             procedure :: UpdateHostStatistics          => HexMesh_UpdateHostStatistics
             procedure :: ConstructZones                => HexMesh_ConstructZones
@@ -4826,6 +4827,31 @@ slavecoord:             DO l = 1, 4
       !$acc wait
 
    end subroutine HexMesh_UpdateHostData
+
+   subroutine HexMesh_UpdateDeviceSolution(self)
+!
+!     -----------------------------------------------------------
+!     Copy the host solution Q to the device, e.g. after it has
+!     been modified on the host by a problem file. No-op in CPU
+!     builds and before the device data has been created.
+!     -----------------------------------------------------------
+!
+      implicit none
+      !-----------------------------------------------------------
+      class(HexMesh)                  :: self
+      !-----------------------------------------------------------
+      integer :: eID
+      !-----------------------------------------------------------
+
+      !$acc wait
+
+      do eID = 1, SIZE(self % elements)
+         !$acc update device(self % elements(eID) % storage % Q) if_present
+      enddo
+
+      !$acc wait
+
+   end subroutine HexMesh_UpdateDeviceSolution
 
    subroutine HexMesh_UpdateFacesHostData(self)
       use Physics

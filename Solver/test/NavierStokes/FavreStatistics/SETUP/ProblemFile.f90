@@ -116,8 +116,11 @@ module FavreStatisticsSamples
                e % storage % Q(IRHOE,i,j,k)       = 2.5_RP + 0.5_RP * rho(sc) * sum(vel**2)
             end do                ; end do                ; end do
             end associate
-            !$acc update device(mesh % elements(eID) % storage % Q) if_present
          end do
+!
+!        Copy Q to the device (GPU builds). The problem file is not compiled
+!        with OpenACC, so this goes through the solver's HexMesh procedure.
+         call mesh % UpdateDeviceSolution()
       end subroutine setSample
 
 end module FavreStatisticsSamples
@@ -690,8 +693,11 @@ end module ProblemFileFunctions
             errRho = 0.0_RP ; errReyMean = 0.0_RP ; errReyFluc = 0.0_RP
             errFavMean = 0.0_RP ; errFavFluc = 0.0_RP ; errFavStress = 0.0_RP
 
+!
+!           Statistics are accumulated on the device in GPU builds
+            call mesh % UpdateHostStatistics()
+
             do eID = 1, mesh % no_of_elements
-               !$acc update self(mesh % elements(eID) % storage % stats % data) if_present
                associate(data => mesh % elements(eID) % storage % stats % data)
                do k = 0, mesh % elements(eID) % Nxyz(3) ; do j = 0, mesh % elements(eID) % Nxyz(2) ; do i = 0, mesh % elements(eID) % Nxyz(1)
                   x = OFFSET * mesh % elements(eID) % geom % x(:,i,j,k)
