@@ -567,7 +567,7 @@ module ShockCapturing
                                 GRADVARS_ENTROPY, GRADVARS_ENERGY
       use Physics,        only: ViscousFlux_STATE, ViscousFlux_ENTROPY, &
                                 ViscousFlux_ENERGY, GuermondPopovFlux_ENTROPY, &
-                                GuermondPopovFlux_STATE, GuermondPopovFlux_ENERGY
+                                GuermondPopovFlux_STATE
 !
 !     ---------
 !     Interface
@@ -624,11 +624,10 @@ module ShockCapturing
          select case (grad_vars)
          case (GRADVARS_STATE);   self % ViscousFlux => GuermondPopovFlux_STATE
          case (GRADVARS_ENTROPY); self % ViscousFlux => GuermondPopovFlux_ENTROPY
-         case (GRADVARS_ENERGY);  self % ViscousFlux => GuermondPopovFlux_ENERGY
          case default
             write(STD_OUT,*) "ERROR. Guermond-Popov (2014) artificial ",  &
-                              "viscosity is only configured for State, Entropy", &
-                              " or Energy gradient variables"
+                              "viscosity is only configured for State or", &
+                              " Entropy gradient variables"
             error stop
          end select
 
