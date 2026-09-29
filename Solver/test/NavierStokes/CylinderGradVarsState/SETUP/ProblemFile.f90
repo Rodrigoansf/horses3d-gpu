@@ -525,6 +525,9 @@ end module ProblemFileFunctions
 !           ---------------
 !
             CHARACTER(LEN=40)                  :: testName           = "Cylinder GradVars State"
+            REAL(KIND=RP), ALLOCATABLE         :: QExpected(:,:,:,:)
+            INTEGER                            :: i, j, k, N
+            TYPE(FTAssertionsManager), POINTER :: sharedManager
 !
 !           -----------------------------------------------------------------------------------------
 !           Expected solutions. 
@@ -547,32 +550,94 @@ end module ProblemFileFunctions
 #if defined(NAVIERSTOKES)
 !
 !           ------------------------------------------------------------------------------
-!           GROUND-TRUTH CAPTURE MODE (grad_vars = state)
+!           Regression baseline (grad_vars = state)
 !           ------------------------------------------------------------------------------
-!           This case is part of a set of three (state/entropy/energy) meant to pin down,
-!           as a regression baseline, that the three gradient-variable choices give a
-!           self-consistent (if not bit-identical) viscous solution after the BR1
-!           volume+face / viscous-flux / LES gradient-consistency fix.
-!
-!           No reference values are hardcoded yet: this print is meant to be captured from
-!           a CI run and then turned into FTAssertEqual checks (same pattern as
-!           Solver/test/NavierStokes/Cylinder/SETUP/ProblemFile.f90), replacing this
-!           whole block. Until then this case always reports success so it does not fail
-!           the build.
+!           Captured from a CI run of this same case on the miguel_gradients_consistency
+!           branch, after the BR1 volume+face / viscous-flux / LES gradient-consistency
+!           fix (same mesh/order/Re/Mach as Solver/test/NavierStokes/Cylinder). The three
+!           gradient-variable choices (state/entropy/energy) are expected to be close but
+!           not bit-identical -- see the branch history for why.
 !           ------------------------------------------------------------------------------
 !
-            WRITE(6,*) "=== GROUND_TRUTH ", testName, " ==="
-            WRITE(6,'(A,I0)')            "GROUND_TRUTH iter                = ", iter
-            WRITE(6,'(A,ES24.16)')       "GROUND_TRUTH residual_continuity = ", monitors % residuals % values(1,1)
-            WRITE(6,'(A,ES24.16)')       "GROUND_TRUTH residual_xmomentum  = ", monitors % residuals % values(2,1)
-            WRITE(6,'(A,ES24.16)')       "GROUND_TRUTH residual_ymomentum  = ", monitors % residuals % values(3,1)
-            WRITE(6,'(A,ES24.16)')       "GROUND_TRUTH residual_zmomentum  = ", monitors % residuals % values(4,1)
-            WRITE(6,'(A,ES24.16)')       "GROUND_TRUTH residual_energy     = ", monitors % residuals % values(5,1)
-            WRITE(6,'(A,ES24.16)')       "GROUND_TRUTH wake_u              = ", monitors % probes(1) % values(1)
-            WRITE(6,'(A,ES24.16)')       "GROUND_TRUTH cd                  = ", monitors % surfaceMonitors(1) % values(1)
-            WRITE(6,'(A,ES24.16)')       "GROUND_TRUTH cl                  = ", monitors % surfaceMonitors(2) % values(1)
-            WRITE(6,*) testName, " ... Passed (ground-truth capture mode, no assertions yet)"
+            INTEGER                            :: iterations(3:7) = [100, 0, 0, 0, 0]
+
+            real(kind=RP), parameter :: residuals(5) = [ 8.8131248889811751E+00_RP, &
+                                                         1.7608838068776677E+01_RP, &
+                                                         1.9037533106264481E-01_RP, &
+                                                         2.4301352846288651E+01_RP, &
+                                                         2.4063786464536875E+02_RP]
+
+            real(kind=RP), parameter           :: wake_u = 1.0965308721733866E-08_RP
+            real(kind=RP), parameter           :: cd = 3.4573345486345957E+01_RP
+            real(kind=RP), parameter           :: cl = -4.6800322916951131E-04_RP
+
+!
+            N = mesh % elements(1) % Nxyz(1) ! This works here because all the elements have the same order in all directions
+
+            CALL initializeSharedAssertionsManager
+            sharedManager => sharedAssertionsManager()
+
+            CALL FTAssertEqual(expectedValue = residuals(1)+1.0_RP, &
+                               actualValue   = monitors % residuals % values(1,1)+1.0_RP, &
+                               tol           = 1.d-11, &
+                               msg           = "Continuity residual")
+
+            CALL FTAssertEqual(expectedValue = residuals(2)+1.0_RP, &
+                               actualValue   = monitors % residuals % values(2,1)+1.0_RP, &
+                               tol           = 1.d-11, &
+                               msg           = "X-Momentum residual")
+
+            CALL FTAssertEqual(expectedValue = residuals(3)+1.0_RP, &
+                               actualValue   = monitors % residuals % values(3,1)+1.0_RP, &
+                               tol           = 1.d-11, &
+                               msg           = "Y-Momentum residual")
+
+            CALL FTAssertEqual(expectedValue = residuals(4)+1.0_RP, &
+                               actualValue   = monitors % residuals % values(4,1)+1.0_RP, &
+                               tol           = 1.d-11, &
+                               msg           = "Z-Momentum residual")
+
+            CALL FTAssertEqual(expectedValue = residuals(5)+1.0_RP, &
+                               actualValue   = monitors % residuals % values(5,1)+1.0_RP, &
+                               tol           = 1.d-11, &
+                               msg           = "Energy residual")
+
+
+            CALL FTAssertEqual(expectedValue = iterations(N), &
+                               actualValue   = iter, &
+                               msg           = "Number of time steps to tolerance")
+
+            CALL FTAssertEqual(expectedValue = wake_u + 1.0_RP, &
+                               actualValue   = monitors % probes(1) % values(1) + 1.0_RP, &
+                               tol           = 1.d-11, &
+                               msg           = "Wake final x-velocity at the point [0,2.0,4.0]")
+
+            CALL FTAssertEqual(expectedValue = cd, &
+                               actualValue   = monitors % surfaceMonitors(1) % values(1), &
+                               tol           = 1.d-11, &
+                               msg           = "Drag coefficient")
+
+            CALL FTAssertEqual(expectedValue = cl + 1.0_RP, &
+                               actualValue   = monitors % surfaceMonitors(2) % values(1) + 1.0_RP, &
+                               tol           = 1.d-11, &
+                               msg           = "Lift coefficient")
+
+
+            CALL sharedManager % summarizeAssertions(title = testName,iUnit = 6)
+
+            IF ( sharedManager % numberOfAssertionFailures() == 0 )     THEN
+               WRITE(6,*) testName, " ... Passed"
+            ELSE
+               WRITE(6,*) testName, " ... Failed"
+               WRITE(6,*) "NOTE: Failure is expected when the max eigenvalue procedure is changed,"
+               WRITE(6,*) "      or when the gradient-consistency fix this baseline pins down is touched."
+               WRITE(6,*) "      If that is intentional, re-compute the expected values and modify this procedure"
+                error stop 99
+            END IF
             WRITE(6,*)
+
+            CALL finalizeSharedAssertionsManager
+            CALL detachSharedAssertionsManager
 #endif
 
 
