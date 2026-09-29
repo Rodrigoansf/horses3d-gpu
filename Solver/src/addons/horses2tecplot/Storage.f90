@@ -468,6 +468,7 @@ module Storage
                case (GRADVARS_ENERGY)
                   write(STD_OUT,'(30X,A,A40,A)') "->","Gradient variables: ", "Energy"
                end select
+               write(STD_OUT,'(30X,A)') "WARNING: must match the 'gradient variables' used to run the simulation, or postprocessed gradients will be wrong."
             else
                write(STD_OUT,'(30X,A,A40,A)') "->","Solution file contains gradients: ", "no"
             end if
