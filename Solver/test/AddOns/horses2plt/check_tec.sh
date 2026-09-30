@@ -7,6 +7,9 @@
 #     ZONE_TYPE: BRICK (volume FE), QUADRILATERAL (surface FE), ORDERED (multizone)
 #                or "-" to skip the check.
 #     VARIABLE:  variable names that must appear in the VARIABLES header.
+#                With a "+" prefix (e.g. +yplus), the variable must also be
+#                strictly positive at every point (only for FE files, which
+#                have a single fluid zone).
 #
 #  horses2plt may exit with code 0 even if the conversion was not performed,
 #  so the output file itself is what gets validated here.
@@ -29,10 +32,27 @@ case $zone in
    *) grep -m1 '^ZONE' "$file" | grep -q "ET=$zone" || fail "expected ZONE with ET=$zone" ;;
 esac
 
-for var in "$@"; do
+for arg in "$@"; do
+   var=${arg#+}
    echo "$varLine" | grep -q "\"$var\"" || fail "variable \"$var\" not found in: $varLine"
 done
 
 grep -qiE '(^|[^a-z])(nan|infinity)([^a-z]|$)' "$file" && fail "NaN/Infinity values found"
+
+for arg in "$@"; do
+   [ "${arg:0:1}" == "+" ] || continue
+   var=${arg#+}
+   # Column of the variable and number of columns of the point data
+   col=$(echo "$varLine" | sed 's/^VARIABLES *= *//' | tr ',' '\n' | grep -nx "\"$var\"" | cut -d: -f1)
+   ncols=$(echo "$varLine" | sed 's/^VARIABLES *= *//' | tr ',' '\n' | wc -l)
+   result=$(awk -v c=$col -v n=$ncols '
+      /^ZONE/ { zones++; next }
+      zones == 1 && NF == n { np++; v = $c + 0; if (np == 1 || v < vmin) vmin = v; if (np == 1 || v > vmax) vmax = v }
+      END { printf "%d %.6e %.6e", np, vmin, vmax }' "$file")
+   read np vmin vmax <<< "$result"
+   [ "$np" -gt 0 ] || fail "no point data found to check \"$var\""
+   awk -v v=$vmin 'BEGIN { exit !(v > 0) }' || fail "\"$var\" is not strictly positive (min = $vmin, max = $vmax)"
+   echo "   \"$var\": $np points, min = $vmin, max = $vmax"
+done
 
 echo "OK [$file]: $(grep -c '^ZONE' "$file") zone(s), $varLine"

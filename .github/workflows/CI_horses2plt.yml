@@ -7,6 +7,7 @@ name: CI HORSES2PLT
 #   * volumetric solutions with gradients  -> RESULTS/Cylinder_*.hsol
 #   * volumetric statistics               -> RESULTS/Cylinder.stats.hsol
 #   * surface solution on the cylinder    -> RESULTS/surfaces/*.surf.hsol
+#     (with u_tau, mu_NS and wall distance: "surface save utau/turbulent")
 # which are then converted to Tecplot with several horses2plt options.
 # Every conversion is checked with check_tec.sh, since horses2plt can exit
 # with code 0 even when no conversion was performed.
@@ -176,6 +177,16 @@ jobs:
           ./check_tec.sh RESULTS/surfaces/Cylinder_bc001_0000000020.surf.tec QUADRILATERAL rho u p T Cp u_x omega_x
         if: '!cancelled()'
 
+      - name: Surface - wall variables from "surface save utau/turbulent" (control file)
+        working-directory: ./Solver/test/AddOns/horses2plt
+        run: |
+          rm -f RESULTS/surfaces/Cylinder_bc001_0000000020.surf.tec
+          ./horses2plt convert/surface_wall.convert
+          # "+" = the variable must be strictly positive (catches fields left at zero by the solver)
+          ./check_tec.sh RESULTS/surfaces/Cylinder_bc001_0000000020.surf.tec QUADRILATERAL \
+                         +u_tau +wall_shear +Cf +mu_ns +wall_distance +yplus rho p
+        if: '!cancelled()'
+
       # TODO: known failures, enable once fixed
       #  * Gauss basis with a fixed order different from the solution order segfaults:
       #      ./horses2plt MESH/Cylinder_0000000000.hmesh RESULTS/Cylinder_0000000020.hsol --output-order=4 --output-basis=Gauss
@@ -187,6 +198,10 @@ jobs:
       #  * Stats/surface files saved with gradients cannot be converted from the command line
       #    (there is no equivalent of "has gradients = .true."):
       #      ./horses2plt MESH/Cylinder_0000000000.hmesh RESULTS/Cylinder.stats.hsol
+      #  * "additional variables" without brackets (e.g. u_tau, turb instead of "[u_tau, turb]")
+      #    segfaults in getTaskTypeControl (getCharArrayFromString does not allocate the array)
+      #  * surf.hsol files saved with "surface save utau/turbulent" cannot be converted from the
+      #    command line (there is no equivalent of "additional variables")
 
 #
 # CHECK CODE COVERAGE

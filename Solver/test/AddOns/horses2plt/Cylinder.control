@@ -2,7 +2,8 @@
 !  Short NS cylinder run used to generate the input files for the horses2plt CI:
 !     * RESULTS/Cylinder_*.hsol              -> volumetric solution (with gradients)
 !     * RESULTS/Cylinder.stats.hsol          -> volumetric statistics
-!     * RESULTS/surfaces/*.surf.hsol         -> surface solution on the cylinder wall
+!     * RESULTS/surfaces/*.surf.hsol         -> surface solution on the cylinder wall,
+!                                               including u_tau, mu_NS and wall distance
 !
 Flow equations        = "NS"
 mesh file name        = "../../TestMeshes/CylinderNSpol3.mesh"
@@ -29,6 +30,8 @@ riemann solver        = roe
 ! -------------------------
 boundaries to save     = [InnerCylinder]
 surface save gradients = .true.
+surface save utau      = .true.  ! u_tau -> Cf, wall_shear
+surface save turbulent = .true.  ! mu_NS and wall distance -> yplus
 
 #define boundary InnerCylinder
   type = NoSlipWall
