@@ -1214,7 +1214,6 @@ module SCsensorClass
 !     Local variables
 !     ---------------
       real(RP) :: ux(3), uy(3), uz(3)
-      real(RP) :: pLoc
 
 
       select case (varType)
@@ -1250,9 +1249,13 @@ module SCsensorClass
 
       case (SC_RHO_GRAD_ID)
          if ( grad_vars == GRADVARS_ENTROPY ) then
-            ! W5 = -rho/p  =>  d(rho)/dx ≈ -p * dW5/dx  (leading-order approx, pressure smooth)
-            pLoc = Pressure(Q)
-            s = POW2(pLoc * U_x(IRHOE)) + POW2(pLoc * U_y(IRHOE)) + POW2(pLoc * U_z(IRHOE))
+            ! Entropy variables: d(rho)/dx = Q . dW/dx exactly (Q = d(rho*s)/dW for the
+            ! convex entropy function, i.e. the Jacobian dQ/dW is symmetric). Verified by
+            ! direct substitution: expanding Q.dW term by term and collecting coefficients
+            ! of rho_x, m_x, E_x gives exactly [1, 0, 0]. The leading-order approximation
+            ! -p*dW5/dx (W5 = -rho/p) drops a (rho/p)*dp/dx term that is not negligible,
+            ! especially across a shock where p is not smooth relative to rho.
+            s = POW2(dot_product(Q, U_x)) + POW2(dot_product(Q, U_y)) + POW2(dot_product(Q, U_z))
          else ! STATE or ENERGY: d(rho)/dx stored directly in U_x(IRHO)
             s = POW2(U_x(IRHO)) + POW2(U_y(IRHO)) + POW2(U_z(IRHO))
          end if

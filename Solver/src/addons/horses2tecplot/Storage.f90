@@ -460,7 +460,7 @@ module Storage
          else
             if ( self % hasGradients ) then
                write(STD_OUT,'(30X,A,A40,A)') "->","Solution file contains gradients: ", "yes"
-               select case (grad_vars)
+               select case (gradVarsOfSolution)
                case (GRADVARS_STATE)
                   write(STD_OUT,'(30X,A,A40,A)') "->","Gradient variables: ", "State (conserved)"
                case (GRADVARS_ENTROPY)
