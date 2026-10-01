@@ -157,6 +157,20 @@ jobs:
           ./check_tec.sh RESULTS/Cylinder.stats.tec BRICK umean vmean wmean Sxx Syy Szz Sxy Sxz Syz rho p
         if: '!cancelled()'
 
+      - name: Statistics legacy - "legacy stats = .true." must match the current format (control file)
+        working-directory: ./Solver/test/AddOns/horses2plt
+        run: |
+          # Legacy files only hold the 9 statistics per point: build one from the current file
+          rm -f RESULTS/Legacy.stats.hsol RESULTS/Legacy.stats.tec RESULTS/Cylinder.stats.tec
+          ./make_legacy_stats.py RESULTS/Cylinder.stats.hsol RESULTS/Legacy.stats.hsol
+          ./horses2plt convert/stats_legacy.convert
+          ./check_tec.sh RESULTS/Legacy.stats.tec ORDERED Umean Vmean Wmean Sxx Syy Szz Sxy Sxz Syz
+          # Same quantities from the current file (Stats2Plt output is dimensionless).
+          # The legacy writer prints 5 significant digits, hence the tolerance.
+          ./horses2plt convert/stats_dimensionless.convert
+          ../mergeStatistics/compare_tec.py RESULTS/Cylinder.stats.tec RESULTS/Legacy.stats.tec 1.0e-4
+        if: '!cancelled()'
+
 ########################################################################
 #######              3) SURFACE SOLUTION (surf.hsol)            ########
 ########################################################################
@@ -190,9 +204,17 @@ jobs:
       # TODO: known failures, enable once fixed
       #  * Gauss basis with a fixed order different from the solution order segfaults:
       #      ./horses2plt MESH/Cylinder_0000000000.hmesh RESULTS/Cylinder_0000000020.hsol --output-order=4 --output-basis=Gauss
-      #  * Statistics and surfaces interpolated to a fixed output order segfault intermittently:
+      #  * Statistics and surfaces interpolated to a fixed output order segfault intermittently,
+      #    also with legacy statistics:
       #      ./horses2plt convert/surface_homogeneous.convert
+      #      ./horses2plt convert/stats_legacy_gauss.convert
+      #      ./horses2plt convert/stats_legacy_homogeneous.convert
       #      (or add "output order = 2" to convert/stats_variables.convert)
+      #  * In a control file, an anisotropic "output order = Nx,Ny,Nz" is read as Nx in all
+      #    directions (getTaskTypeControl uses "pos" before setting it). The command-line
+      #    flag --output-order=Nx,Ny,Nz works.
+      #  * "legacy stats" can only be set in a control file (no command-line flag), and legacy
+      #    statistics are always written in multizone mode ("output mode = FE" is ignored).
       #  * RMS statistics (Vfrms, ufrms, vfrms, wfrms) give NaN when the variance is ~0
       #    (sqrt of a slightly negative number): add them to convert/stats_variables.convert
       #  * Stats/surface files saved with gradients cannot be converted from the command line
