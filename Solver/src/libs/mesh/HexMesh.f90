@@ -46,6 +46,10 @@ MODULE HexMeshClass
       public      HexMesh_GatherMPIFacesSolution, HexMesh_GatherMPIFacesGradients
       public      HexMesh_ComputeLocalGradient
 !
+!     -----------------------------------------------------------------------
+!     Uniform-grid spatial index for fast point-in-element queries.
+!     -----------------------------------------------------------------------
+!
 !     ---------------
 !     Mesh definition
 !     ---------------
@@ -1702,6 +1706,8 @@ slavecoord:             DO l = 1, 4
       integer           :: zoneID
       integer           :: no_of_bdry_faces
       integer           :: no_of_faces
+      integer           :: Nmin, Nmax, Nmin_g, Nmax_g
+      integer           :: local_dof, total_dof
       integer, allocatable :: facesPerZone(:)
       character(len=LINE_LENGTH) :: str
       !----------------------------------------------------
@@ -1711,6 +1717,10 @@ slavecoord:             DO l = 1, 4
 !     Gather information
 !     ------------------
 
+      local_dof = sum( (self % Nx + 1) * (self % Ny + 1) * (self % Nz + 1) )
+      Nmin      = min(minval(self % Nx), minval(self % Ny), minval(self % Nz))
+      Nmax      = max(maxval(self % Nx), maxval(self % Ny), maxval(self % Nz))
+
       if (  MPI_Process % doMPIAction ) then
 #ifdef _HAS_MPI_
          do zoneID = 1, size(self % zones)
@@ -1719,6 +1729,10 @@ slavecoord:             DO l = 1, 4
 
          no_of_bdry_faces = sum(facesPerZone)
          no_of_faces      = (6*self % no_of_allElements + no_of_bdry_faces)/2
+
+         call mpi_reduce ( local_dof, total_dof, 1, MPI_INTEGER, MPI_SUM, 0, MPI_COMM_WORLD, ierr )
+         call mpi_reduce ( Nmin,      Nmin_g,    1, MPI_INTEGER, MPI_MIN, 0, MPI_COMM_WORLD, ierr )
+         call mpi_reduce ( Nmax,      Nmax_g,    1, MPI_INTEGER, MPI_MAX, 0, MPI_COMM_WORLD, ierr )
 #endif
       else
          do zoneID = 1, size(self % zones)
@@ -1726,7 +1740,10 @@ slavecoord:             DO l = 1, 4
          end do
 
          no_of_bdry_faces = sum(facesPerZone)
-         no_of_faces = size ( self % faces )
+         no_of_faces      = size ( self % faces )
+         total_dof        = local_dof
+         Nmin_g           = Nmin
+         Nmax_g           = Nmax
       end if
 
 
@@ -1743,8 +1760,13 @@ slavecoord:             DO l = 1, 4
 
       write(STD_OUT,'(30X,A,A28,I10)') "->" , "Number of elements: " , self % no_of_allElements
       write(STD_OUT,'(30X,A,A28,I10)') "->" , "Number of faces: " , no_of_faces
-
       write(STD_OUT,'(30X,A,A28,I10)') "->" , "Number of boundary faces: " , no_of_bdry_faces
+      if ( Nmin_g .eq. Nmax_g ) then
+         write(STD_OUT,'(30X,A,A28,I10)')      "->" , "Polynomial order: " , Nmin_g
+      else
+         write(STD_OUT,'(30X,A,A28,I4,A,I4)') "->" , "Polynomial order: " , Nmin_g, " -", Nmax_g
+      end if
+      write(STD_OUT,'(30X,A,A28,I10)') "->" , "Degrees of freedom: " , total_dof
       write(STD_OUT,'(30X,A,A28,I10)') "->" , "Order of curved faces: " , bFaceOrder
       write(STD_OUT,'(30X,A,A28,L10)') "->" , "2D extruded mesh: " , self % meshIs2D
 
@@ -4016,23 +4038,37 @@ slavecoord:             DO l = 1, 4
 !
 !////////////////////////////////////////////////////////////////////////
 !
-      logical function HexMesh_FindPointWithCoords(self, x, eID, xi, optionalElements)
+      logical function HexMesh_FindPointWithCoords(self, x, eID, xi, optionalElements, eID_hint)
          implicit none
          class(HexMesh), intent(in)         :: self
          real(kind=RP),    intent(in)       :: x(NDIM)
          integer,          intent(out)      :: eID
          real(kind=RP),    intent(out)      :: xi(NDIM)
          integer, optional,intent(in)       :: optionalElements(:)
+         integer, optional,intent(in)       :: eID_hint
 !
 !        ---------------
 !        Local variables
 !        ---------------
 !
-         integer     :: op_eID
+         integer     :: op_eID, hint
          integer     :: zoneID, fID
          logical     :: success
 
          HexMesh_FindPointWithCoords = .false.
+!
+!        Try local search from hint element first (for spatially ordered probe sets)
+!        ---------------------------------------------------------------------------
+         if ( present(eID_hint) ) then
+            hint = eID_hint
+            if ( hint >= 1 .and. hint <= self % no_of_elements ) then
+               if ( self % FindPointWithCoordsInNeighbors(x, xi, hint, 6) ) then
+                  eID = hint
+                  HexMesh_FindPointWithCoords = .true.
+                  return
+               end if
+            end if
+         end if
 !
 !        Search in optionalElements (if present)
 !        ---------------------------------------
@@ -4116,6 +4152,7 @@ slavecoord:             DO l = 1, 4
                if (new_eID == 0) cycle
                success = self % FindPointWithCoordsInNeighbors(x, xi, new_eID, depth-1)
                if ( success ) then
+                  eID = new_eID
                   HexMesh_FindPointWithCoordsInNeighbors = .TRUE.
                   return
                end if
