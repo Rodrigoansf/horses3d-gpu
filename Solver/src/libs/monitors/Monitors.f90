@@ -278,7 +278,7 @@ module MonitorsClass
             allocate( Monitors % probesVariables(size(probesVariables)) )
             Monitors % probesVariables = probesVariables
 
-            call InitializeProbesFromFile( trim(probesFileName), Monitors, mesh )
+            call InitializeProbesFromFile( trim(probesFileName), Monitors, mesh, no_of_fileProbes )
 
 #ifdef HAS_HDF5
             if ( trim(probeFileOutputFormat) .eq. "HDF5" ) then
@@ -1738,7 +1738,7 @@ end subroutine getNoOfMonitors
    end subroutine Monitor_FileProbeKernel
 #endif
 
-   subroutine InitializeProbesFromFile(fileName, Monitors, mesh)
+   subroutine InitializeProbesFromFile(fileName, Monitors, mesh, nfp)
       use MPI_Process_Info
 #ifdef _HAS_MPI_
       use mpi
@@ -1747,12 +1747,13 @@ end subroutine getNoOfMonitors
       character(len=*),   intent(in)    :: fileName
       class(Monitor_t),    intent(inout) :: Monitors
       class(HexMesh),     intent(inout) :: mesh
+      integer,            intent(in)    :: nfp
 !
 !     ---------------
 !     Local variables
 !     ---------------
 !
-      integer                                      :: fID, io, nTok, nfp, i, nFound, ierr, prev_eID_local, nv
+      integer                                      :: fID, io, nTok, i, nFound, ierr, prev_eID_local, nv
       character(len=LINE_LENGTH)                   :: line
       character(len=STR_LEN_MONITORS), allocatable  :: tokens(:)
       real(kind=RP),    allocatable :: allX(:,:)
@@ -1761,8 +1762,15 @@ end subroutine getNoOfMonitors
       logical,          allocatable :: foundLocal(:)
       integer,          allocatable :: ownerCandidate(:)
       integer,          allocatable :: globalOwner(:)
-
-      call countProbesInFile( fileName, nfp )
+!
+!     nfp is the caller's own countProbesInFile result (Monitors_Construct),
+!     not re-derived here: at O(1e3) MPI ranks every rank would otherwise
+!     open and re-count this same file a second time over a shared/network
+!     filesystem, and any inconsistency between the two counts (even from a
+!     single rank, under heavy concurrent I/O) would size fp_x/fp_buf/etc.
+!     below differently from what every other file-probe routine assumes
+!     via Monitors % no_of_fileProbes - a silent out-of-bounds write.
+!     --------------------------------------------------------------------
       if ( nfp .le. 0 ) return
 
       allocate( allX          (NDIM, nfp) )
