@@ -1312,7 +1312,7 @@ end subroutine getNoOfMonitors
 !     Local variables
 !     ---------------
 !
-      integer        :: i
+      integer        :: i, v, k, nfp, fp_offset, nv
       integer        :: iter_arr(1)
       real(kind=RP)  :: t_arr(1)
       logical        :: do_write
@@ -1320,16 +1320,42 @@ end subroutine getNoOfMonitors
       iter_arr(1) = iter_now
       t_arr(1)   = t_now
 
+      ! Monitor-level timestep filter (shared by both output formats below):
+      ! skip the O(N) sync/write work entirely outside the save-timestep window.
+      do_write = .true.
+      if ( self % probeFileSaveTimestep .gt. 0.0_RP ) then
+         if ( t_now .lt. self % fp_lastSavedTime + self % probeFileSaveTimestep ) do_write = .false.
+      end if
+
+      if ( do_write ) then
+!
+!        Pull the values computed by Monitor_UpdateFileProbes (stored in the
+!        SoA buffer fp_buf/fp_values_gpu) back into each probe's own 'values'
+!        array. Needed by Probe_t % WriteToFile (ASCII path) and by any other
+!        code (e.g. UserDefinedFinalize) reading monitors % probes(:) % values
+!        for a file-probe, which is otherwise left stale since Monitor_UpdateFileProbes
+!        never touches it directly.
+!        --------------------------------------------------------------------
+         nfp       = self % no_of_fileProbes
+         nv        = size(self % probesVariables)
+         fp_offset = self % no_of_probes - nfp
+         do k = 1, nfp
+            i = fp_offset + k
+            do v = 1, nv
+#ifdef _OPENACC
+               self % probes(i) % values(v,1) = self % fp_values_gpu(v,k)
+#else
+               self % probes(i) % values(v,1) = self % fp_buf((k-1)*nv + v)
+#endif
+            end do
+         end do
+      end if
+
 #ifdef HAS_HDF5
       if ( trim(self % probeFileOutputFormat) .eq. "HDF5" ) then
          call Monitor_WriteFileProbesHDF5( self, iter_arr, t_arr, 1 )
       else
 #endif
-         ! Monitor-level timestep filter: skip the O(N) loop and N file opens entirely
-         do_write = .true.
-         if ( self % probeFileSaveTimestep .gt. 0.0_RP ) then
-            if ( t_now .lt. self % fp_lastSavedTime + self % probeFileSaveTimestep ) do_write = .false.
-         end if
          if ( do_write ) then
             self % fp_lastSavedTime = t_now
             do i = self % no_of_probes - self % no_of_fileProbes + 1, self % no_of_probes
