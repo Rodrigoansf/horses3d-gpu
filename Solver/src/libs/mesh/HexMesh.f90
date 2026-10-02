@@ -4147,6 +4147,13 @@ slavecoord:             DO l = 1, 4
 
          if (depth > 1) then
             do fID=1, FACES_PER_ELEMENT
+!
+!              globID == 0 means this face has no neighbor at all (boundary
+!              face, never passed through ConstructConnectivity, left at its
+!              default). Must be skipped before indexing global2localeID,
+!              which is only valid for globID >= 1.
+!              -----------------------------------------------------------
+               if (self % elements(eID) % Connection(fID) % globID <= 0) cycle
 
                new_eID = mpi_partition % global2localeID (self % elements(eID) % Connection(fID) % globID)
                if (new_eID == 0) cycle

@@ -1796,6 +1796,7 @@ end subroutine getNoOfMonitors
 #endif
 
    subroutine InitializeProbesFromFile(fileName, probes, offset, mesh, solution_file, FirstCall, variables, saveTimestep, outputFormat)
+      use MPI_Process_Info
       implicit none
       character(len=*),   intent(in)    :: fileName
       class(Probe_t),     intent(inout) :: probes(:)
@@ -1849,7 +1850,18 @@ end subroutine getNoOfMonitors
                                              isFileProbe_in = .true., outputFormat_in = trim(outputFormat), &
                                              eID_hint = prev_eID )
          probes(idx) % saveTimestep = saveTimestep
-         if ( probes(idx) % active ) prev_eID = probes(idx) % eID
+!
+!        Only trust eID as a neighbor-search hint for the next probe when
+!        this rank actually owns it. probes(idx) % active reflects GLOBAL
+!        ownership (set true by Probe_LookInOtherPartitions on every rank
+!        once ANY rank finds the point), so on a non-owning rank eID is
+!        left at whatever FindPointWithCoords set it to on local failure
+!        and must never be handed to FindPointWithCoords as a hint - doing
+!        so indexes mpi_partition % global2localeid out of bounds.
+!        --------------------------------------------------------------------
+         if ( probes(idx) % active .and. probes(idx) % rank .eq. MPI_Process % rank ) then
+            prev_eID = probes(idx) % eID
+         end if
 
          deallocate(tokens)
       end do
