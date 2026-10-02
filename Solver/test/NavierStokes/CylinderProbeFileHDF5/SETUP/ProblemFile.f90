@@ -622,16 +622,46 @@ end module ProblemFileFunctions
             END DO
 !
 !           Remaining file-probe variables (v, w, rho, pressure, mach, k,
-!           velocity) at probe 2 -- printed for now, not yet hardened with
-!           ground-truth values from a CI run.
+!           velocity) at probe 2, hardened with ground-truth values
+!           captured from an actual CI run (CI_parallel_NS, run 36995526283).
+!           Identical to the ASCII test case (same point, same physics) -
+!           confirms monitors % probes(:) % values is populated the same
+!           way regardless of output format.
 !           -----------------------------------------------------------------
-            WRITE(6,*) "GROUND_TRUTH probeFileHDF5 v        = ", monitors % probes(2) % values(2,1)
-            WRITE(6,*) "GROUND_TRUTH probeFileHDF5 w        = ", monitors % probes(2) % values(3,1)
-            WRITE(6,*) "GROUND_TRUTH probeFileHDF5 rho      = ", monitors % probes(2) % values(4,1)
-            WRITE(6,*) "GROUND_TRUTH probeFileHDF5 pressure = ", monitors % probes(2) % values(5,1)
-            WRITE(6,*) "GROUND_TRUTH probeFileHDF5 mach     = ", monitors % probes(2) % values(6,1)
-            WRITE(6,*) "GROUND_TRUTH probeFileHDF5 k        = ", monitors % probes(2) % values(7,1)
-            WRITE(6,*) "GROUND_TRUTH probeFileHDF5 velocity = ", monitors % probes(2) % values(8,1)
+            CALL FTAssertEqual(expectedValue = -5.1694788113224519E-12_RP + 1.0_RP, &
+                               actualValue   = monitors % probes(2) % values(2,1) + 1.0_RP, &
+                               tol           = 1.d-11, &
+                               msg           = "File-probe v at the point [0,2.0,4.0]")
+
+            CALL FTAssertEqual(expectedValue = 1.0000001564970464_RP, &
+                               actualValue   = monitors % probes(2) % values(3,1), &
+                               tol           = 1.d-11, &
+                               msg           = "File-probe w at the point [0,2.0,4.0]")
+
+            CALL FTAssertEqual(expectedValue = 1.0000000480383817_RP, &
+                               actualValue   = monitors % probes(2) % values(4,1), &
+                               tol           = 1.d-11, &
+                               msg           = "File-probe rho at the point [0,2.0,4.0]")
+
+            CALL FTAssertEqual(expectedValue = 7.9365084721826635_RP, &
+                               actualValue   = monitors % probes(2) % values(5,1), &
+                               tol           = 1.d-11, &
+                               msg           = "File-probe pressure at the point [0,2.0,4.0]")
+
+            CALL FTAssertEqual(expectedValue = 0.30000004403061858_RP, &
+                               actualValue   = monitors % probes(2) % values(6,1), &
+                               tol           = 1.d-11, &
+                               msg           = "File-probe mach at the point [0,2.0,4.0]")
+
+            CALL FTAssertEqual(expectedValue = 0.50000018051624784_RP, &
+                               actualValue   = monitors % probes(2) % values(7,1), &
+                               tol           = 1.d-11, &
+                               msg           = "File-probe k at the point [0,2.0,4.0]")
+
+            CALL FTAssertEqual(expectedValue = 1.0000001564970464_RP, &
+                               actualValue   = monitors % probes(2) % values(8,1), &
+                               tol           = 1.d-11, &
+                               msg           = "File-probe velocity at the point [0,2.0,4.0]")
 
             CALL FTAssertEqual(expectedValue = cd, &
                                actualValue   = monitors % surfaceMonitors(1) % values(1), &
