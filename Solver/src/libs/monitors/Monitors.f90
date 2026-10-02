@@ -219,7 +219,24 @@ module MonitorsClass
             call readProbesFileBlock( probesFileName, probesVariablesLine, no_of_probesVariables, probeFileSaveTimestep, probeFileOutputFormat )
 
             if ( len_trim(probesFileName) .gt. 0 ) then
-               call countProbesInFile( trim(probesFileName), no_of_fileProbes )
+!
+!              Root-only count + broadcast: with O(1e3) MPI ranks all
+!              opening/reading the same (possibly huge) probes file
+!              independently, there is no guarantee every rank's count
+!              agrees (seen in practice as a hung MPI_Allreduce deep
+!              inside InitializeProbesFromFile, since a mismatched count
+!              on even one rank breaks that collective). Reading it once
+!              on root and broadcasting the result removes the ambiguity
+!              entirely instead of hoping O(1e3) concurrent reads agree.
+!              --------------------------------------------------------------
+               if ( MPI_Process % isRoot ) then
+                  call countProbesInFile( trim(probesFileName), no_of_fileProbes )
+               end if
+#ifdef _HAS_MPI_
+               if ( MPI_Process % doMPIAction ) then
+                  call MPI_Bcast(no_of_fileProbes, 1, MPI_INTEGER, 0, MPI_COMM_WORLD, ierr)
+               end if
+#endif
 
                if ( len_trim(probesVariablesLine) .gt. 0 ) then
                   call splitIntoTokens( trim(probesVariablesLine), probesVariables, no_of_probesVariables )
@@ -1780,45 +1797,65 @@ end subroutine getNoOfMonitors
       allocate( ownerCandidate(nfp)       )
       allocate( globalOwner   (nfp)       )
 !
-!     Pass 1: read every probe's coordinates and do ONLY the LOCAL point
-!     search (mesh % FindPointWithCoords has no MPI in it) - no
-!     communication happens in this loop at all. The eID hint is cascaded
-!     from one probe to the next only when the search ACTUALLY succeeded
+!     Pass 1a: ONLY root reads the probes file and fills allX/nFound.
+!     At O(1e3) MPI ranks, having every rank independently open and parse
+!     the same (possibly huge, 1e6-line) file is not just wasteful - there
+!     is no guarantee all of them count the same nFound under that much
+!     concurrent I/O on a shared/network filesystem, and the MPI_Allreduce
+!     a few lines below REQUIRES the same count on every rank or it hangs
+!     forever (observed in practice on a 2240-rank MareNostrum 5 run, with
+!     every rank's backtrace sitting inside that exact Allreduce). Reading
+!     once on root and broadcasting removes the ambiguity by construction.
+!     --------------------------------------------------------------------
+      if ( MPI_Process % isRoot ) then
+         nFound = 0
+         open ( newunit = fID , file = fileName , status = "old" , action = "read" )
+
+         do
+            read ( fID , '(A)' , iostat = io ) line
+            if ( io .ne. 0 ) exit
+
+            line = adjustl(line)
+            if ( len_trim(line) .eq. 0 ) cycle
+            if ( line(1:1) .eq. '#' )    cycle
+
+            call splitIntoTokens(line, tokens, nTok)
+
+            if ( nTok .lt. 3 ) then
+               deallocate(tokens)
+               cycle
+            end if
+
+            nFound = nFound + 1
+            read(tokens(1),*) allX(1,nFound)
+            read(tokens(2),*) allX(2,nFound)
+            read(tokens(3),*) allX(3,nFound)
+
+            deallocate(tokens)
+         end do
+
+         close(fID)
+      end if
+
+#ifdef _HAS_MPI_
+      if ( MPI_Process % doMPIAction ) then
+         call MPI_Bcast(nFound, 1, MPI_INTEGER, 0, MPI_COMM_WORLD, ierr)
+         call MPI_Bcast(allX, NDIM*nfp, MPI_DOUBLE_PRECISION, 0, MPI_COMM_WORLD, ierr)
+      end if
+#endif
+!
+!     Pass 1b: every rank does its OWN local point search (no I/O, no MPI)
+!     over the now-identical allX/nFound. The eID hint is cascaded from
+!     one probe to the next only when the search ACTUALLY succeeded
 !     locally, so it is always either -1 or a genuinely valid local
 !     element on this rank.
 !     --------------------------------------------------------------------
-      nFound = 0
       prev_eID_local = -1
-      open ( newunit = fID , file = fileName , status = "old" , action = "read" )
-
-      do
-         read ( fID , '(A)' , iostat = io ) line
-         if ( io .ne. 0 ) exit
-
-         line = adjustl(line)
-         if ( len_trim(line) .eq. 0 ) cycle
-         if ( line(1:1) .eq. '#' )    cycle
-
-         call splitIntoTokens(line, tokens, nTok)
-
-         if ( nTok .lt. 3 ) then
-            deallocate(tokens)
-            cycle
-         end if
-
-         nFound = nFound + 1
-         read(tokens(1),*) allX(1,nFound)
-         read(tokens(2),*) allX(2,nFound)
-         read(tokens(3),*) allX(3,nFound)
-
-         foundLocal(nFound) = mesh % FindPointWithCoords(allX(:,nFound), eID_local(nFound), &
-                                                           xi_local(:,nFound), eID_hint=prev_eID_local)
-         if ( foundLocal(nFound) ) prev_eID_local = eID_local(nFound)
-
-         deallocate(tokens)
+      do i = 1, nFound
+         foundLocal(i) = mesh % FindPointWithCoords(allX(:,i), eID_local(i), &
+                                                      xi_local(:,i), eID_hint=prev_eID_local)
+         if ( foundLocal(i) ) prev_eID_local = eID_local(i)
       end do
-
-      close(fID)
 !
 !     Resolve, for EVERY file-probe at once, which rank owns it with a
 !     single bulk MPI collective - not one mpi_allgather per probe (the
