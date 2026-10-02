@@ -56,6 +56,16 @@ module ProbeClass
    contains
 
       subroutine Probe_Initialization(self, mesh, ID, solution_file, FirstCall, x_in, variables_in, name_in, isFileProbe_in, outputFormat_in, eID_hint, ownershipResolved_in, eID_in, xi_in, active_in, rank_in)
+!        NOTE: x_in/variables_in/name_in/isFileProbe_in/outputFormat_in/
+!        eID_hint/ownershipResolved_in/eID_in/xi_in/active_in/rank_in are
+!        currently vestigial: bulk "#define probe file" probes no longer
+!        go through Probe_t % Initialization at all (InitializeProbesFromFile
+!        in Monitors.f90 builds Monitors' own SoA buffers directly instead,
+!        to avoid a Probe_t per file-probe at O(1e6) scale). Only inline
+!        "#define probe N" blocks call this routine now, always with none
+!        of the above present. Left in place rather than removed to limit
+!        the blast radius of that change; safe to delete if this file-probe
+!        path is never revived.
          use ParamfileRegions
          use MPI_Process_Info
          use Utilities, only: toLower

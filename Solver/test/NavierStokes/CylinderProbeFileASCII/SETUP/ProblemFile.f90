@@ -528,7 +528,7 @@ end module ProblemFileFunctions
             REAL(KIND=RP)                      :: maxError
             REAL(KIND=RP), ALLOCATABLE         :: QExpected(:,:,:,:)
             INTEGER                            :: eID
-            INTEGER                            :: i, j, k, N
+            INTEGER                            :: i, j, k, N, nv
             TYPE(FTAssertionsManager), POINTER :: sharedManager
             LOGICAL                            :: success
 !
@@ -605,57 +605,63 @@ end module ProblemFileFunctions
                                msg           = "Wake final x-velocity at the point [0,2.0,4.0]")
 !
 !           -----------------------------------------------------------------
-!           Bulk "probe file" checks (probes 2-5, all at [0,2.0,4.0]).
-!           Variable 1 ("u") must reproduce the inline-probe wake_u value
-!           exactly: same point, same variable, independent computation
-!           path (InitializeProbesFromFile / Monitor_UpdateFileProbes vs.
-!           Probe_Update). This cross-validates ownership resolution,
-!           MPI reduction and the ASCII write-back fix in one shot.
+!           Bulk "probe file" checks (file-probes 1-4, all at [0,2.0,4.0]).
+!           File-probes no longer live in monitors % probes(:) (that would
+!           replicate a full Probe_t per probe on every rank - exactly the
+!           O(1e6) memory problem this was fixed for); their reduced values
+!           live in monitors % fp_buf, laid out as
+!           (local_file_probe_index-1)*nv + variable_index. Variable 1 ("u")
+!           must reproduce the inline-probe wake_u value exactly: same
+!           point, same variable, independent computation path
+!           (InitializeProbesFromFile / Monitor_UpdateFileProbes vs.
+!           Probe_Update). This cross-validates ownership resolution and
+!           MPI reduction in one shot.
 !           -----------------------------------------------------------------
 !
-            DO i = 2, 5
+            nv = size(monitors % probesVariables)
+            DO k = 1, 4
                CALL FTAssertEqual(expectedValue = wake_u + 1.0_RP, &
-                                  actualValue   = monitors % probes(i) % values(1,1) + 1.0_RP, &
+                                  actualValue   = monitors % fp_buf((k-1)*nv + 1) + 1.0_RP, &
                                   tol           = 1.d-11, &
                                   msg           = "File-probe x-velocity at the point [0,2.0,4.0]")
             END DO
 !
 !           Remaining file-probe variables (v, w, rho, pressure, mach, k,
-!           velocity) at probe 2, hardened with ground-truth values
+!           velocity) at file-probe 1, hardened with ground-truth values
 !           captured from an actual CI run (CI_parallel_NS, run 36995526283).
 !           -----------------------------------------------------------------
             CALL FTAssertEqual(expectedValue = -5.1694788113224519E-12_RP + 1.0_RP, &
-                               actualValue   = monitors % probes(2) % values(2,1) + 1.0_RP, &
+                               actualValue   = monitors % fp_buf(2) + 1.0_RP, &
                                tol           = 1.d-11, &
                                msg           = "File-probe v at the point [0,2.0,4.0]")
 
             CALL FTAssertEqual(expectedValue = 1.0000001564970464_RP, &
-                               actualValue   = monitors % probes(2) % values(3,1), &
+                               actualValue   = monitors % fp_buf(3), &
                                tol           = 1.d-11, &
                                msg           = "File-probe w at the point [0,2.0,4.0]")
 
             CALL FTAssertEqual(expectedValue = 1.0000000480383817_RP, &
-                               actualValue   = monitors % probes(2) % values(4,1), &
+                               actualValue   = monitors % fp_buf(4), &
                                tol           = 1.d-11, &
                                msg           = "File-probe rho at the point [0,2.0,4.0]")
 
             CALL FTAssertEqual(expectedValue = 7.9365084721826635_RP, &
-                               actualValue   = monitors % probes(2) % values(5,1), &
+                               actualValue   = monitors % fp_buf(5), &
                                tol           = 1.d-11, &
                                msg           = "File-probe pressure at the point [0,2.0,4.0]")
 
             CALL FTAssertEqual(expectedValue = 0.30000004403061858_RP, &
-                               actualValue   = monitors % probes(2) % values(6,1), &
+                               actualValue   = monitors % fp_buf(6), &
                                tol           = 1.d-11, &
                                msg           = "File-probe mach at the point [0,2.0,4.0]")
 
             CALL FTAssertEqual(expectedValue = 0.50000018051624784_RP, &
-                               actualValue   = monitors % probes(2) % values(7,1), &
+                               actualValue   = monitors % fp_buf(7), &
                                tol           = 1.d-11, &
                                msg           = "File-probe k at the point [0,2.0,4.0]")
 
             CALL FTAssertEqual(expectedValue = 1.0000001564970464_RP, &
-                               actualValue   = monitors % probes(2) % values(8,1), &
+                               actualValue   = monitors % fp_buf(8), &
                                tol           = 1.d-11, &
                                msg           = "File-probe velocity at the point [0,2.0,4.0]")
 

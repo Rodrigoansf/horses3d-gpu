@@ -56,6 +56,18 @@ module MonitorsClass
       integer                                    :: fp_nOwned = 0
       integer             , allocatable          :: fp_ownedIdx(:)
       real(kind=RP)       , allocatable          :: fp_buf(:)
+!     fp_x/fp_fileUnit are the only per-file-probe state kept O(total) on
+!     every rank - coordinates (needed by root for the HDF5 /coordinates
+!     dataset and for ASCII headers) and the ASCII "keep file open" file
+!     unit. Both are tiny (real/int arrays, not full Probe_t). Everything
+!     else that used to live in Monitors % probes(:) for file-probes (one
+!     Probe_t per probe, replicated on every rank regardless of ownership)
+!     is now built directly by InitializeProbesFromFile into fp_nOwned/
+!     fp_ownedIdx/fp_cpu_* (CPU) or fp_eID/fp_lxi/... (GPU) below, sized
+!     O(owned probes on this rank) instead of O(total probes).
+      real(kind=RP)       , allocatable          :: fp_x(:,:)
+      integer             , allocatable          :: fp_fileUnit(:)
+      logical             , allocatable          :: fp_active(:)
 #ifndef _OPENACC
 !     Compact SoA for CPU path: owned-probe data laid out contiguously to avoid
 !     stride-112 scattered access into the main probes(:) array.
@@ -244,22 +256,30 @@ module MonitorsClass
          end do
 
 #ifdef FLOW
-         allocate ( Monitors % probes ( Monitors % no_of_probes + no_of_fileProbes )  )
+         allocate ( Monitors % probes ( Monitors % no_of_probes )  )
          !$acc update device(Monitors)
          do i = 1 , Monitors % no_of_probes
             call Monitors % probes(i) % Initialization ( mesh , i, probes_solution_file , FirstCall )
          end do
 
+!        File-probes (bulk "#define probe file" block) no longer get a
+!        Probe_t entry each: InitializeProbesFromFile builds Monitors'
+!        own SoA buffers (fp_x, fp_nOwned/fp_ownedIdx/fp_cpu_* or
+!        fp_eID/fp_lxi/...) directly, sized O(owned probes on this rank)
+!        instead of replicating a full Probe_t (two character(128)
+!        strings plus several array descriptors each) for every one of
+!        up to O(1e6) probes on every single MPI rank.
+!        --------------------------------------------------------------
          if ( no_of_fileProbes .gt. 0 ) then
-            call InitializeProbesFromFile( trim(probesFileName), Monitors % probes, Monitors % no_of_probes, &
-                                            mesh, probes_solution_file, FirstCall, probesVariables, probeFileSaveTimestep, &
-                                            probeFileOutputFormat )
             Monitors % probesFileName         = trim(probesFileName)
             Monitors % probeFileSaveTimestep  = probeFileSaveTimestep
             Monitors % probeFileOutputFormat  = probeFileOutputFormat
             Monitors % fp_lastSavedTime       = -huge(0.0_RP)
             allocate( Monitors % probesVariables(size(probesVariables)) )
             Monitors % probesVariables = probesVariables
+
+            call InitializeProbesFromFile( trim(probesFileName), Monitors, mesh )
+
 #ifdef HAS_HDF5
             if ( trim(probeFileOutputFormat) .eq. "HDF5" ) then
                call Monitor_InitFileProbesHDF5( Monitors, no_of_fileProbes )
@@ -269,79 +289,6 @@ module MonitorsClass
 
          Monitors % no_of_fileProbes = no_of_fileProbes
          Monitors % no_of_probes = Monitors % no_of_probes + no_of_fileProbes
-#ifdef _OPENACC
-         if ( no_of_fileProbes .gt. 0 ) call Monitor_InitFileProbesGPU( Monitors, no_of_fileProbes )
-#else
-!        Build compact SoA for CPU path: owned-probe index, pre-allocated MPI buffer, and
-!        contiguous copies of eID/Nxyz/lxi/leta/lzeta to avoid stride-N scattered cache misses
-!        into the main probes(:) array (owned probes are spaced stride-nRanks apart).
-         if ( no_of_fileProbes .gt. 0 ) then
-            block
-               use MPI_Process_Info
-               integer :: fp_offset_loc, ii, nv_loc, Nmax_loc, pidx
-               fp_offset_loc = Monitors % no_of_probes - no_of_fileProbes
-               nv_loc = size(Monitors % probesVariables)
-!              Pass 1: count owned probes and determine max polynomial order
-               Monitors % fp_nOwned = 0
-               Nmax_loc = 0
-               do ii = 1, no_of_fileProbes
-                  pidx = fp_offset_loc + ii
-                  if ( Monitors % probes(pidx) % active .and. &
-                       Monitors % probes(pidx) % rank .eq. MPI_Process % rank ) then
-                     Monitors % fp_nOwned = Monitors % fp_nOwned + 1
-                     Nmax_loc = max(Nmax_loc, maxval(mesh % elements(Monitors % probes(pidx) % eID) % Nxyz))
-                  end if
-               end do
-               allocate( Monitors % fp_ownedIdx(no_of_fileProbes) )
-               allocate( Monitors % fp_buf(no_of_fileProbes * nv_loc) )
-               Monitors % fp_buf = 0.0_RP
-!              Allocate compact SoA arrays for owned probes
-               allocate( Monitors % fp_cpu_eID  (Monitors % fp_nOwned) )
-               allocate( Monitors % fp_cpu_Nx   (Monitors % fp_nOwned) )
-               allocate( Monitors % fp_cpu_Ny   (Monitors % fp_nOwned) )
-               allocate( Monitors % fp_cpu_Nz   (Monitors % fp_nOwned) )
-               allocate( Monitors % fp_cpu_lxi  (0:Nmax_loc, Monitors % fp_nOwned) )
-               allocate( Monitors % fp_cpu_leta (0:Nmax_loc, Monitors % fp_nOwned) )
-               allocate( Monitors % fp_cpu_lzeta(0:Nmax_loc, Monitors % fp_nOwned) )
-               allocate( Monitors % fp_cpu_varCodes(nv_loc) )
-!              Build varCode integer mapping (eliminates per-timestep string comparison)
-               do ii = 1, nv_loc
-                  select case (trim(Monitors % probesVariables(ii)))
-                  case("pressure")        ; Monitors % fp_cpu_varCodes(ii) = FPVAR_PRESSURE
-                  case("velocity")        ; Monitors % fp_cpu_varCodes(ii) = FPVAR_VELOCITY
-                  case("u")               ; Monitors % fp_cpu_varCodes(ii) = FPVAR_U
-                  case("v")               ; Monitors % fp_cpu_varCodes(ii) = FPVAR_V
-                  case("w")               ; Monitors % fp_cpu_varCodes(ii) = FPVAR_W
-                  case("mach")            ; Monitors % fp_cpu_varCodes(ii) = FPVAR_MACH
-                  case("k")               ; Monitors % fp_cpu_varCodes(ii) = FPVAR_K
-                  case("rho")             ; Monitors % fp_cpu_varCodes(ii) = FPVAR_RHO
-                  case("static-pressure") ; Monitors % fp_cpu_varCodes(ii) = FPVAR_STATICPRES
-                  case("density")         ; Monitors % fp_cpu_varCodes(ii) = FPVAR_DENSITY
-                  case default            ; Monitors % fp_cpu_varCodes(ii) = FPVAR_UNKNOWN
-                  end select
-               end do
-!              Pass 2: fill fp_ownedIdx and compact SoA arrays (owned probes only)
-               Monitors % fp_nOwned = 0
-               do ii = 1, no_of_fileProbes
-                  pidx = fp_offset_loc + ii
-                  if ( Monitors % probes(pidx) % active .and. &
-                       Monitors % probes(pidx) % rank .eq. MPI_Process % rank ) then
-                     Monitors % fp_nOwned = Monitors % fp_nOwned + 1
-                     Monitors % fp_ownedIdx(Monitors % fp_nOwned) = pidx
-                     Monitors % fp_cpu_eID(Monitors % fp_nOwned)   = Monitors % probes(pidx) % eID
-                     associate(eNxyz => mesh % elements(Monitors % probes(pidx) % eID) % Nxyz)
-                     Monitors % fp_cpu_Nx (Monitors % fp_nOwned)   = eNxyz(1)
-                     Monitors % fp_cpu_Ny (Monitors % fp_nOwned)   = eNxyz(2)
-                     Monitors % fp_cpu_Nz (Monitors % fp_nOwned)   = eNxyz(3)
-                     Monitors % fp_cpu_lxi  (0:eNxyz(1), Monitors%fp_nOwned) = Monitors % probes(pidx) % lxi
-                     Monitors % fp_cpu_leta (0:eNxyz(2), Monitors%fp_nOwned) = Monitors % probes(pidx) % leta
-                     Monitors % fp_cpu_lzeta(0:eNxyz(3), Monitors%fp_nOwned) = Monitors % probes(pidx) % lzeta
-                     end associate
-                  end if
-               end do
-            end block
-         end if
-#endif
 #endif
 
 #if defined(NAVIERSTOKES) || defined(INCNS)
@@ -884,6 +831,15 @@ module MonitorsClass
          end if
          call self % probes % destruct
          safedeallocate (self % probes)
+
+         if ( allocated(self % fp_fileUnit) ) then
+            do i = 1, size(self % fp_fileUnit)
+               if ( self % fp_fileUnit(i) .ge. 0 ) close( self % fp_fileUnit(i) )
+            end do
+         end if
+         safedeallocate( self % fp_x )
+         safedeallocate( self % fp_fileUnit )
+         safedeallocate( self % fp_active )
 #endif
 #ifdef _OPENACC
          if ( allocated(self % fp_eID) ) then
@@ -988,6 +944,16 @@ module MonitorsClass
 !        for truncation-error/load-balancing estimation) would hit
 !        unallocated arrays there - a real crash, not just a stale-data bug.
 !        --------------------------------------------------------------------
+         if ( allocated(from % fp_x) ) then
+            safedeallocate(to % fp_x) ; allocate(to % fp_x(size(from%fp_x,1),size(from%fp_x,2))) ; to % fp_x = from % fp_x
+         end if
+         if ( allocated(from % fp_fileUnit) ) then
+            safedeallocate(to % fp_fileUnit) ; allocate(to % fp_fileUnit(size(from % fp_fileUnit))) ; to % fp_fileUnit = from % fp_fileUnit
+         end if
+         if ( allocated(from % fp_active) ) then
+            safedeallocate(to % fp_active) ; allocate(to % fp_active(size(from % fp_active))) ; to % fp_active = from % fp_active
+         end if
+
          to % fp_nOwned = from % fp_nOwned
          if ( allocated(from % fp_ownedIdx) ) then
             safedeallocate(to % fp_ownedIdx) ; allocate(to % fp_ownedIdx(size(from % fp_ownedIdx))) ; to % fp_ownedIdx = from % fp_ownedIdx
@@ -1342,7 +1308,6 @@ end subroutine getNoOfMonitors
 !     Local variables
 !     ---------------
 !
-      integer        :: i, v, k, nfp, fp_offset, nv
       integer        :: iter_arr(1)
       real(kind=RP)  :: t_arr(1)
       logical        :: do_write
@@ -1351,34 +1316,10 @@ end subroutine getNoOfMonitors
       t_arr(1)   = t_now
 
       ! Monitor-level timestep filter (shared by both output formats below):
-      ! skip the O(N) sync/write work entirely outside the save-timestep window.
+      ! skip the write entirely outside the save-timestep window.
       do_write = .true.
       if ( self % probeFileSaveTimestep .gt. 0.0_RP ) then
          if ( t_now .lt. self % fp_lastSavedTime + self % probeFileSaveTimestep ) do_write = .false.
-      end if
-
-      if ( do_write ) then
-!
-!        Pull the values computed by Monitor_UpdateFileProbes (stored in the
-!        SoA buffer fp_buf/fp_values_gpu) back into each probe's own 'values'
-!        array. Needed by Probe_t % WriteToFile (ASCII path) and by any other
-!        code (e.g. UserDefinedFinalize) reading monitors % probes(:) % values
-!        for a file-probe, which is otherwise left stale since Monitor_UpdateFileProbes
-!        never touches it directly.
-!        --------------------------------------------------------------------
-         nfp       = self % no_of_fileProbes
-         nv        = size(self % probesVariables)
-         fp_offset = self % no_of_probes - nfp
-         do k = 1, nfp
-            i = fp_offset + k
-            do v = 1, nv
-#ifdef _OPENACC
-               self % probes(i) % values(v,1) = self % fp_values_gpu(v,k)
-#else
-               self % probes(i) % values(v,1) = self % fp_buf((k-1)*nv + v)
-#endif
-            end do
-         end do
       end if
 
 #ifdef HAS_HDF5
@@ -1388,15 +1329,82 @@ end subroutine getNoOfMonitors
 #endif
          if ( do_write ) then
             self % fp_lastSavedTime = t_now
-            do i = self % no_of_probes - self % no_of_fileProbes + 1, self % no_of_probes
-               call self % probes(i) % WriteToFile( iter_arr, t_arr, 1 )
-            end do
+            call Monitor_WriteFileProbesASCII( self, iter_arr, t_arr, 1 )
          end if
 #ifdef HAS_HDF5
       end if
 #endif
 
    end subroutine Monitor_FlushFileProbesNow
+
+   subroutine Monitor_WriteFileProbesASCII(self, iter, t, no_of_lines)
+!
+!     Appends one buffer of file-probe data to each probe's own ASCII
+!     file. Root-only, like the old Probe_t % WriteToFile: fp_buf/
+!     fp_values_gpu already hold the globally-reduced values on every
+!     rank (via Monitor_UpdateFileProbes's Allreduce), so root alone can
+!     write every probe regardless of which rank actually owns it. The
+!     file is opened once (header written) and kept open across calls
+!     via fp_fileUnit - no Probe_t needed to track this per probe.
+!     Probes that were never found anywhere (fp_active=.false.) get no
+!     file at all, matching the old behavior.
+!     -------------------------------------------------------------------
+      use MPI_Process_Info
+      implicit none
+      class(Monitor_t), intent(inout) :: self
+      integer,          intent(in)    :: iter(:)
+      real(kind=RP),    intent(in)    :: t(:)
+      integer,          intent(in)    :: no_of_lines
+!
+!     ---------------
+!     Local variables
+!     ---------------
+!
+      integer                         :: i, v, l, fID, nfp, nv, offset
+      character(len=LINE_LENGTH)      :: fname
+      character(len=STR_LEN_MONITORS) :: pname
+
+      if ( .not. MPI_Process % isRoot ) return
+
+      nfp    = self % no_of_fileProbes
+      nv     = size(self % probesVariables)
+      offset = self % no_of_probes - nfp
+
+      do i = 1, nfp
+         if ( .not. self % fp_active(i) ) cycle
+
+         if ( self % fp_fileUnit(i) .lt. 0 ) then
+            write(pname,'(A,I0)') "probe_", offset + i
+            write(fname,'(A,A,A,A)') trim(self % probes_solution_file), "." , trim(pname) , ".probe"
+            open( newunit = fID , file = trim(fname) , status = "unknown" , action = "write" )
+
+            write( fID , '(A20,A  )') "Monitor name:      ", trim(pname)
+            write( fID , '(A25,ES24.10,2(4X,ES24.10))') "x, y, z coordinates: ", self % fp_x(1,i), self % fp_x(2,i), self % fp_x(3,i)
+            write( fID , * )
+            write( fID , '(A10,2X,A24)' , advance = "no") "Iteration" , "Time"
+            do v = 1 , nv
+               write( fID , '(2X,A24)' , advance = "no") trim(self % probesVariables(v))
+            end do
+            write( fID , * )
+
+            self % fp_fileUnit(i) = fID
+         end if
+
+         fID = self % fp_fileUnit(i)
+         do l = 1, no_of_lines
+            write( fID , '(I10,2X,ES24.16)' , advance = "no" ) iter(l) , t(l)
+            do v = 1 , nv
+#ifdef _OPENACC
+               write( fID , '(2X,ES24.16)' , advance = "no" ) self % fp_values_gpu(v,i)
+#else
+               write( fID , '(2X,ES24.16)' , advance = "no" ) self % fp_buf((i-1)*nv + v)
+#endif
+            end do
+            write( fID , * )
+         end do
+      end do
+
+   end subroutine Monitor_WriteFileProbesASCII
 
    subroutine Monitor_UpdateFileProbes(self, mesh, bufferPos)
       use MPI_Process_Info
@@ -1412,19 +1420,18 @@ end subroutine getNoOfMonitors
 !     Local variables
 !     ---------------
 !
-      integer        :: i, v, j, nfp, nv, fp_offset, ierr
+      integer        :: i, v, j, nfp, nv, ierr
 #ifdef _OPENACC
       integer        :: Nm
 #endif
 
       nfp       = self % no_of_fileProbes
       nv        = size(self % probesVariables)
-      fp_offset = self % no_of_probes - nfp
 
 #ifdef _OPENACC
 !
 !     GPU path: parallel evaluation of all file-probes on device.
-!     Lagrange weights and element IDs are pre-loaded in SoA arrays by Monitor_InitFileProbesGPU.
+!     Lagrange weights and element IDs are pre-loaded in SoA arrays by InitializeProbesFromFile.
 !     Non-owning ranks skip computation (fp_ownsProbe=.false.) and contribute 0 to MPI_Allreduce.
 !     The kernel is in Monitor_FileProbeKernel so arrays arrive as dummy arguments — this avoids
 !     NVFORTRAN accessing them through the host-side 'self' struct pointer on the GPU.
@@ -1444,12 +1451,12 @@ end subroutine getNoOfMonitors
 
 #else
 !
-!     CPU path: compact SoA compute — reads eID/lxi/leta/lzeta from contiguous arrays built
-!     at init time, writes directly into fp_buf.  Avoids stride-nRanks scattered access
-!     into the probes(:) array (owned probes are spaced ~nRanks apart in a 100k array).
+!     CPU path: compact SoA compute — reads eID/lxi/leta/lzeta from contiguous
+!     fp_cpu_* arrays built once at init time (InitializeProbesFromFile),
+!     writes directly into fp_buf.
 !
       self % fp_buf = 0.0_RP
-      call Monitor_ComputeFileProbesCPU(self, mesh, fp_offset, nv)
+      call Monitor_ComputeFileProbesCPU(self, mesh, nv)
 
 #ifdef _HAS_MPI_
       if ( MPI_Process % doMPIAction ) then
@@ -1461,18 +1468,20 @@ end subroutine getNoOfMonitors
    end subroutine Monitor_UpdateFileProbes
 
 #ifndef _OPENACC
-   subroutine Monitor_ComputeFileProbesCPU(self, mesh, fp_offset, nv)
+   subroutine Monitor_ComputeFileProbesCPU(self, mesh, nv)
 !
 !     Compact SoA compute loop for file-probes on CPU.
 !     Reads eID/Nxyz/lxi/leta/lzeta from contiguous fp_cpu_* arrays built at construction,
 !     and accumulates Lagrange-interpolated values directly into fp_buf.
-!     This avoids stride-nRanks access into the scattered probes(:) struct array.
+!     fp_ownedIdx holds the LOCAL file-probe index (1..no_of_fileProbes)
+!     directly - there is no probes(:) array for file-probes any more to
+!     translate back from.
 !
       use Physics
       implicit none
       class(Monitor_t), intent(inout) :: self
       class(HexMesh),   intent(in)    :: mesh
-      integer,          intent(in)    :: fp_offset, nv
+      integer,          intent(in)    :: nv
 !
 !     Local variables
 !
@@ -1487,8 +1496,8 @@ end subroutine getNoOfMonitors
          Nx   = self % fp_cpu_Nx(p)
          Ny   = self % fp_cpu_Ny(p)
          Nz   = self % fp_cpu_Nz(p)
-!        Position in fp_buf for this probe: (global_probe_index - fp_offset - 1)*nv + 1
-         jbuf = (self % fp_ownedIdx(p) - fp_offset - 1) * nv
+!        Position in fp_buf for this probe: (local_file_probe_index - 1)*nv + 1
+         jbuf = (self % fp_ownedIdx(p) - 1) * nv
          do v = 1, nv
             value = 0.0_RP
             select case (self % fp_cpu_varCodes(v))
@@ -1606,102 +1615,6 @@ end subroutine getNoOfMonitors
 #endif
 
 #ifdef _OPENACC
-   subroutine Monitor_InitFileProbesGPU(self, nfp)
-!
-!     Build Structure-of-Arrays (SoA) representation of all file-probe Lagrange weights
-!     and element IDs, then transfer the six resulting arrays to the GPU in one batch.
-!     This replaces 7*nfp individual !$acc enter data copyin calls with 6 total transfers.
-!     Assumes uniform polynomial order (Nmax derived from an owned probe + MPI_Allreduce).
-!
-      use MPI_Process_Info
-#ifdef _HAS_MPI_
-      use mpi
-#endif
-      implicit none
-      class(Monitor_t), intent(inout) :: self
-      integer,          intent(in)    :: nfp
-!
-!     Local variables
-!
-      integer :: i, v, fp_offset, Nmax, ierr
-      logical :: owns
-
-      if (nfp .eq. 0) return
-
-      fp_offset = self % no_of_probes - nfp
-
-      ! Nmax: derived from an owned probe; MPI_Allreduce(MAX) to agree across ranks.
-      ! Ranks that own no probes (or whose first probe is unowned) contribute 0.
-      Nmax = 0
-      do i = 1, nfp
-         if ( self % probes(fp_offset + i) % active .and. &
-              self % probes(fp_offset + i) % rank .eq. MPI_Process % rank ) then
-            Nmax = size(self % probes(fp_offset + i) % lxi) - 1
-            exit
-         end if
-      end do
-#ifdef _HAS_MPI_
-      if ( MPI_Process % doMPIAction ) then
-         call MPI_Allreduce(MPI_IN_PLACE, Nmax, 1, MPI_INTEGER, MPI_MAX, MPI_COMM_WORLD, ierr)
-      end if
-#endif
-      self % fp_Nmax = Nmax
-
-      ! Map variable name strings to integer codes (done once at init, not per timestep)
-      allocate( self % fp_varCodes(size(self % probesVariables)) )
-      do v = 1, size(self % probesVariables)
-         select case (trim(self % probesVariables(v)))
-         case("pressure")       ; self % fp_varCodes(v) = FPVAR_PRESSURE
-         case("velocity")       ; self % fp_varCodes(v) = FPVAR_VELOCITY
-         case("u")              ; self % fp_varCodes(v) = FPVAR_U
-         case("v")              ; self % fp_varCodes(v) = FPVAR_V
-         case("w")              ; self % fp_varCodes(v) = FPVAR_W
-         case("mach")           ; self % fp_varCodes(v) = FPVAR_MACH
-         case("k")              ; self % fp_varCodes(v) = FPVAR_K
-         case("rho")            ; self % fp_varCodes(v) = FPVAR_RHO
-         case("static-pressure"); self % fp_varCodes(v) = FPVAR_STATICPRES
-         case("density")        ; self % fp_varCodes(v) = FPVAR_DENSITY
-         case default           ; self % fp_varCodes(v) = FPVAR_UNKNOWN
-         end select
-      end do
-
-      ! Allocate SoA arrays
-      allocate( self % fp_eID      (nfp) )
-      allocate( self % fp_ownsProbe(nfp) )
-      allocate( self % fp_lxi  (0:Nmax, nfp) )
-      allocate( self % fp_leta (0:Nmax, nfp) )
-      allocate( self % fp_lzeta(0:Nmax, nfp) )
-      allocate( self % fp_values_gpu(size(self % probesVariables), nfp) )
-      self % fp_lxi       = 0.0_RP
-      self % fp_leta      = 0.0_RP
-      self % fp_lzeta     = 0.0_RP
-      self % fp_values_gpu = 0.0_RP
-
-      ! Fill from per-probe data; only copy lxi/leta/lzeta for owned probes
-      ! (non-owning ranks have lxi/leta/lzeta unallocated).
-      do i = 1, nfp
-         owns = ( self % probes(fp_offset + i) % active .and. &
-                  self % probes(fp_offset + i) % rank .eq. MPI_Process % rank )
-         self % fp_eID      (i) = self % probes(fp_offset + i) % eID
-         self % fp_ownsProbe(i) = owns
-         if ( owns ) then
-            self % fp_lxi  (:, i) = self % probes(fp_offset + i) % lxi
-            self % fp_leta (:, i) = self % probes(fp_offset + i) % leta
-            self % fp_lzeta(:, i) = self % probes(fp_offset + i) % lzeta
-         end if
-      end do
-
-      ! Six bulk copyin calls instead of 7*nfp per-probe copyin calls
-      !$acc enter data copyin(self % fp_eID)
-      !$acc enter data copyin(self % fp_ownsProbe)
-      !$acc enter data copyin(self % fp_lxi)
-      !$acc enter data copyin(self % fp_leta)
-      !$acc enter data copyin(self % fp_lzeta)
-      !$acc enter data copyin(self % fp_varCodes)
-      !$acc enter data create(self % fp_values_gpu)
-
-   end subroutine Monitor_InitFileProbesGPU
-
    subroutine Monitor_FileProbeKernel(l_eID, l_own, l_lxi, l_leta, l_lzeta, &
                                        l_varCodes, l_vals, mesh, nfp, nv, Nm)
       implicit none
@@ -1825,30 +1738,23 @@ end subroutine getNoOfMonitors
    end subroutine Monitor_FileProbeKernel
 #endif
 
-   subroutine InitializeProbesFromFile(fileName, probes, offset, mesh, solution_file, FirstCall, variables, saveTimestep, outputFormat)
+   subroutine InitializeProbesFromFile(fileName, Monitors, mesh)
       use MPI_Process_Info
 #ifdef _HAS_MPI_
       use mpi
 #endif
       implicit none
       character(len=*),   intent(in)    :: fileName
-      class(Probe_t),     intent(inout) :: probes(:)
-      integer,            intent(in)    :: offset
+      class(Monitor_t),    intent(inout) :: Monitors
       class(HexMesh),     intent(inout) :: mesh
-      character(len=*),   intent(in)    :: solution_file
-      logical,            intent(in)    :: FirstCall
-      character(len=*),   intent(in)    :: variables(:)
-      real(kind=RP),      intent(in)    :: saveTimestep
-      character(len=*),   intent(in)    :: outputFormat
 !
 !     ---------------
 !     Local variables
 !     ---------------
 !
-      integer                                      :: fID, io, idx, nTok, nfp, i, nFound, ierr, prev_eID_local
+      integer                                      :: fID, io, nTok, nfp, i, nFound, ierr, prev_eID_local, nv
       character(len=LINE_LENGTH)                   :: line
       character(len=STR_LEN_MONITORS), allocatable  :: tokens(:)
-      character(len=STR_LEN_MONITORS)               :: pname
       real(kind=RP),    allocatable :: allX(:,:)
       real(kind=RP),    allocatable :: xi_local(:,:)
       integer,          allocatable :: eID_local(:)
@@ -1856,7 +1762,7 @@ end subroutine getNoOfMonitors
       integer,          allocatable :: ownerCandidate(:)
       integer,          allocatable :: globalOwner(:)
 
-      nfp = size(probes) - offset
+      call countProbesInFile( fileName, nfp )
       if ( nfp .le. 0 ) return
 
       allocate( allX          (NDIM, nfp) )
@@ -1930,23 +1836,163 @@ end subroutine getNoOfMonitors
       globalOwner = ownerCandidate
 #endif
 !
-!     Pass 2: finalize each probe (Lagrange weights, ASCII header, ...)
-!     now that ownership is known - no further communication needed.
+!     Pass 2: build Monitors' own SoA buffers directly from the LOCAL
+!     eID_local/xi_local/globalOwner computed above - no Probe_t, no
+!     per-probe allocation, no further communication. fp_x is the only
+!     thing kept O(total probes) on every rank (just 3 reals/probe,
+!     needed by root for the HDF5 /coordinates dataset and for ASCII
+!     headers); everything else below is sized O(owned probes on this
+!     rank).
 !     --------------------------------------------------------------------
-      idx = offset
-      do i = 1, nFound
-         idx = idx + 1
-         write(pname,'(A,I0)') "probe_", idx
+      nv = size(Monitors % probesVariables)
 
-         call probes(idx) % Initialization( mesh, idx, solution_file, FirstCall, &
-                                             x_in = allX(:,i), variables_in = variables, name_in = trim(pname), &
-                                             isFileProbe_in = .true., outputFormat_in = trim(outputFormat), &
-                                             ownershipResolved_in = .true., &
-                                             eID_in = eID_local(i), xi_in = xi_local(:,i), &
-                                             active_in = (globalOwner(i) .ge. 0), &
-                                             rank_in = globalOwner(i) )
-         probes(idx) % saveTimestep = saveTimestep
-      end do
+      allocate( Monitors % fp_x(NDIM, nFound) )
+      Monitors % fp_x = allX(:, 1:nFound)
+
+      allocate( Monitors % fp_active(nFound) )
+      Monitors % fp_active = ( globalOwner(1:nFound) .ge. 0 )
+
+      allocate( Monitors % fp_fileUnit(nFound) )
+      Monitors % fp_fileUnit = -1
+
+      allocate( Monitors % fp_buf(nFound * nv) )
+      Monitors % fp_buf = 0.0_RP
+
+#ifdef _OPENACC
+      block
+         integer :: ii, Nmax
+         logical :: owns
+
+         Nmax = 0
+         do ii = 1, nFound
+            if ( globalOwner(ii) .eq. MPI_Process % rank ) then
+               Nmax = max(Nmax, maxval(mesh % elements(eID_local(ii)) % Nxyz))
+            end if
+         end do
+#ifdef _HAS_MPI_
+         if ( MPI_Process % doMPIAction ) then
+            call MPI_Allreduce(MPI_IN_PLACE, Nmax, 1, MPI_INTEGER, MPI_MAX, MPI_COMM_WORLD, ierr)
+         end if
+#endif
+         Monitors % fp_Nmax = Nmax
+
+         allocate( Monitors % fp_varCodes(nv) )
+         do ii = 1, nv
+            select case (trim(Monitors % probesVariables(ii)))
+            case("pressure")       ; Monitors % fp_varCodes(ii) = FPVAR_PRESSURE
+            case("velocity")       ; Monitors % fp_varCodes(ii) = FPVAR_VELOCITY
+            case("u")              ; Monitors % fp_varCodes(ii) = FPVAR_U
+            case("v")              ; Monitors % fp_varCodes(ii) = FPVAR_V
+            case("w")              ; Monitors % fp_varCodes(ii) = FPVAR_W
+            case("mach")           ; Monitors % fp_varCodes(ii) = FPVAR_MACH
+            case("k")              ; Monitors % fp_varCodes(ii) = FPVAR_K
+            case("rho")            ; Monitors % fp_varCodes(ii) = FPVAR_RHO
+            case("static-pressure"); Monitors % fp_varCodes(ii) = FPVAR_STATICPRES
+            case("density")        ; Monitors % fp_varCodes(ii) = FPVAR_DENSITY
+            case default           ; Monitors % fp_varCodes(ii) = FPVAR_UNKNOWN
+            end select
+         end do
+
+         allocate( Monitors % fp_eID      (nFound) )
+         allocate( Monitors % fp_ownsProbe(nFound) )
+         allocate( Monitors % fp_lxi  (0:Nmax, nFound) )
+         allocate( Monitors % fp_leta (0:Nmax, nFound) )
+         allocate( Monitors % fp_lzeta(0:Nmax, nFound) )
+         allocate( Monitors % fp_values_gpu(nv, nFound) )
+         Monitors % fp_lxi        = 0.0_RP
+         Monitors % fp_leta       = 0.0_RP
+         Monitors % fp_lzeta      = 0.0_RP
+         Monitors % fp_values_gpu = 0.0_RP
+
+         do ii = 1, nFound
+            owns = ( globalOwner(ii) .eq. MPI_Process % rank )
+            Monitors % fp_eID(ii)       = eID_local(ii)
+            Monitors % fp_ownsProbe(ii) = owns
+            if ( owns ) then
+               associate(eNxyz => mesh % elements(eID_local(ii)) % Nxyz)
+               associate( spAxi   => NodalStorage(eNxyz(1)), &
+                          spAeta  => NodalStorage(eNxyz(2)), &
+                          spAzeta => NodalStorage(eNxyz(3)) )
+               Monitors % fp_lxi  (0:eNxyz(1), ii) = spAxi   % lj(xi_local(1,ii))
+               Monitors % fp_leta (0:eNxyz(2), ii) = spAeta  % lj(xi_local(2,ii))
+               Monitors % fp_lzeta(0:eNxyz(3), ii) = spAzeta % lj(xi_local(3,ii))
+               end associate
+               end associate
+            end if
+         end do
+
+         !$acc enter data copyin(Monitors % fp_eID)
+         !$acc enter data copyin(Monitors % fp_ownsProbe)
+         !$acc enter data copyin(Monitors % fp_lxi)
+         !$acc enter data copyin(Monitors % fp_leta)
+         !$acc enter data copyin(Monitors % fp_lzeta)
+         !$acc enter data copyin(Monitors % fp_varCodes)
+         !$acc enter data create(Monitors % fp_values_gpu)
+      end block
+#else
+      block
+         integer :: ii, Nmax_loc
+
+         Monitors % fp_nOwned = 0
+         Nmax_loc = 0
+         do ii = 1, nFound
+            if ( globalOwner(ii) .eq. MPI_Process % rank ) then
+               Monitors % fp_nOwned = Monitors % fp_nOwned + 1
+               Nmax_loc = max(Nmax_loc, maxval(mesh % elements(eID_local(ii)) % Nxyz))
+            end if
+         end do
+
+         allocate( Monitors % fp_ownedIdx(Monitors % fp_nOwned) )
+         allocate( Monitors % fp_cpu_eID  (Monitors % fp_nOwned) )
+         allocate( Monitors % fp_cpu_Nx   (Monitors % fp_nOwned) )
+         allocate( Monitors % fp_cpu_Ny   (Monitors % fp_nOwned) )
+         allocate( Monitors % fp_cpu_Nz   (Monitors % fp_nOwned) )
+         allocate( Monitors % fp_cpu_lxi  (0:Nmax_loc, Monitors % fp_nOwned) )
+         allocate( Monitors % fp_cpu_leta (0:Nmax_loc, Monitors % fp_nOwned) )
+         allocate( Monitors % fp_cpu_lzeta(0:Nmax_loc, Monitors % fp_nOwned) )
+         allocate( Monitors % fp_cpu_varCodes(nv) )
+         do ii = 1, nv
+            select case (trim(Monitors % probesVariables(ii)))
+            case("pressure")        ; Monitors % fp_cpu_varCodes(ii) = FPVAR_PRESSURE
+            case("velocity")        ; Monitors % fp_cpu_varCodes(ii) = FPVAR_VELOCITY
+            case("u")               ; Monitors % fp_cpu_varCodes(ii) = FPVAR_U
+            case("v")               ; Monitors % fp_cpu_varCodes(ii) = FPVAR_V
+            case("w")               ; Monitors % fp_cpu_varCodes(ii) = FPVAR_W
+            case("mach")            ; Monitors % fp_cpu_varCodes(ii) = FPVAR_MACH
+            case("k")               ; Monitors % fp_cpu_varCodes(ii) = FPVAR_K
+            case("rho")             ; Monitors % fp_cpu_varCodes(ii) = FPVAR_RHO
+            case("static-pressure") ; Monitors % fp_cpu_varCodes(ii) = FPVAR_STATICPRES
+            case("density")         ; Monitors % fp_cpu_varCodes(ii) = FPVAR_DENSITY
+            case default            ; Monitors % fp_cpu_varCodes(ii) = FPVAR_UNKNOWN
+            end select
+         end do
+
+!        fp_ownedIdx now stores the LOCAL file-probe index (1..nFound)
+!        directly - there is no global probes(:) index to translate back
+!        from any more, so Monitor_ComputeFileProbesCPU's jbuf math below
+!        drops the old "- fp_offset" adjustment.
+         Monitors % fp_nOwned = 0
+         do ii = 1, nFound
+            if ( globalOwner(ii) .eq. MPI_Process % rank ) then
+               Monitors % fp_nOwned = Monitors % fp_nOwned + 1
+               Monitors % fp_ownedIdx(Monitors % fp_nOwned) = ii
+               Monitors % fp_cpu_eID(Monitors % fp_nOwned)  = eID_local(ii)
+               associate(eNxyz => mesh % elements(eID_local(ii)) % Nxyz)
+               associate( spAxi   => NodalStorage(eNxyz(1)), &
+                          spAeta  => NodalStorage(eNxyz(2)), &
+                          spAzeta => NodalStorage(eNxyz(3)) )
+               Monitors % fp_cpu_Nx(Monitors % fp_nOwned) = eNxyz(1)
+               Monitors % fp_cpu_Ny(Monitors % fp_nOwned) = eNxyz(2)
+               Monitors % fp_cpu_Nz(Monitors % fp_nOwned) = eNxyz(3)
+               Monitors % fp_cpu_lxi  (0:eNxyz(1), Monitors % fp_nOwned) = spAxi   % lj(xi_local(1,ii))
+               Monitors % fp_cpu_leta (0:eNxyz(2), Monitors % fp_nOwned) = spAeta  % lj(xi_local(2,ii))
+               Monitors % fp_cpu_lzeta(0:eNxyz(3), Monitors % fp_nOwned) = spAzeta % lj(xi_local(3,ii))
+               end associate
+               end associate
+            end if
+         end do
+      end block
+#endif
 
    end subroutine InitializeProbesFromFile
 
@@ -1979,33 +2025,26 @@ end subroutine getNoOfMonitors
       integer(HID_T)   :: file_id, dset_id, dspace_id, dcpl_id
       integer(HSIZE_T) :: dims2(2), maxdims2(2), chunk2(2)
       integer(HSIZE_T) :: dims1(1), maxdims1(1), chunk1(1)
-      integer          :: iError, j, v, fp_offset, nv
+      integer          :: iError, v, nv
       character(len=LINE_LENGTH) :: fname
-      real(kind=RP), allocatable :: coords(:,:)
 
       if ( .not. MPI_Process % isRoot ) return
 
-      nv        = size(self % probesVariables)
-      fp_offset = self % no_of_probes  ! probes are allocated 1..no_of_probes+no_of_fileProbes
-                                        ! but at this point no_of_probes has not yet been bumped
+      nv = size(self % probesVariables)
 
       write(fname,'(A,A)') trim(self % probes_solution_file), ".probes.h5"
 
       call h5open_f(iError)
       call h5fcreate_f(trim(fname), H5F_ACC_TRUNC_F, file_id, iError)
 
-      ! /coordinates  (3, nProbes) — fixed at creation
-      allocate( coords(3, no_of_fileProbes) )
-      do j = 1, no_of_fileProbes
-         coords(:, j) = self % probes(fp_offset + j) % x
-      end do
+      ! /coordinates  (3, nProbes) — fixed at creation, straight from fp_x
+      ! (populated for every file-probe by InitializeProbesFromFile)
       dims2 = [ int(3, HSIZE_T), int(no_of_fileProbes, HSIZE_T) ]
       call h5screate_simple_f(2, dims2, dspace_id, iError)
       call h5dcreate_f(file_id, "coordinates", H5T_NATIVE_DOUBLE, dspace_id, dset_id, iError)
-      call h5dwrite_f(dset_id, H5T_NATIVE_DOUBLE, coords, dims2, iError)
+      call h5dwrite_f(dset_id, H5T_NATIVE_DOUBLE, self % fp_x, dims2, iError)
       call h5dclose_f(dset_id, iError)
       call h5sclose_f(dspace_id, iError)
-      deallocate(coords)
 
       ! /time  (extendible 1-D)
       dims1(1)    = 0
