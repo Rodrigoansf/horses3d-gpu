@@ -1797,6 +1797,9 @@ end subroutine getNoOfMonitors
 
    subroutine InitializeProbesFromFile(fileName, probes, offset, mesh, solution_file, FirstCall, variables, saveTimestep, outputFormat)
       use MPI_Process_Info
+#ifdef _HAS_MPI_
+      use mpi
+#endif
       implicit none
       character(len=*),   intent(in)    :: fileName
       class(Probe_t),     intent(inout) :: probes(:)
@@ -1812,15 +1815,36 @@ end subroutine getNoOfMonitors
 !     Local variables
 !     ---------------
 !
-      integer                                      :: fID, io, idx, nTok, prev_eID
+      integer                                      :: fID, io, idx, nTok, nfp, i, nFound, ierr, prev_eID_local
       character(len=LINE_LENGTH)                   :: line
-      real(kind=RP)                                :: x(NDIM)
       character(len=STR_LEN_MONITORS), allocatable  :: tokens(:)
       character(len=STR_LEN_MONITORS)               :: pname
+      real(kind=RP),    allocatable :: allX(:,:)
+      real(kind=RP),    allocatable :: xi_local(:,:)
+      integer,          allocatable :: eID_local(:)
+      logical,          allocatable :: foundLocal(:)
+      integer,          allocatable :: ownerCandidate(:)
+      integer,          allocatable :: globalOwner(:)
 
-      idx = offset
-      prev_eID = -1
+      nfp = size(probes) - offset
+      if ( nfp .le. 0 ) return
 
+      allocate( allX          (NDIM, nfp) )
+      allocate( xi_local      (NDIM, nfp) )
+      allocate( eID_local     (nfp)       )
+      allocate( foundLocal    (nfp)       )
+      allocate( ownerCandidate(nfp)       )
+      allocate( globalOwner   (nfp)       )
+!
+!     Pass 1: read every probe's coordinates and do ONLY the LOCAL point
+!     search (mesh % FindPointWithCoords has no MPI in it) - no
+!     communication happens in this loop at all. The eID hint is cascaded
+!     from one probe to the next only when the search ACTUALLY succeeded
+!     locally, so it is always either -1 or a genuinely valid local
+!     element on this rank.
+!     --------------------------------------------------------------------
+      nFound = 0
+      prev_eID_local = -1
       open ( newunit = fID , file = fileName , status = "old" , action = "read" )
 
       do
@@ -1838,35 +1862,61 @@ end subroutine getNoOfMonitors
             cycle
          end if
 
-         read(tokens(1),*) x(1)
-         read(tokens(2),*) x(2)
-         read(tokens(3),*) x(3)
+         nFound = nFound + 1
+         read(tokens(1),*) allX(1,nFound)
+         read(tokens(2),*) allX(2,nFound)
+         read(tokens(3),*) allX(3,nFound)
 
-         idx = idx + 1
-         write(pname,'(A,I0)') "probe_", idx
-
-         call probes(idx) % Initialization( mesh, idx, solution_file, FirstCall, &
-                                             x_in = x, variables_in = variables, name_in = trim(pname), &
-                                             isFileProbe_in = .true., outputFormat_in = trim(outputFormat), &
-                                             eID_hint = prev_eID )
-         probes(idx) % saveTimestep = saveTimestep
-!
-!        Only trust eID as a neighbor-search hint for the next probe when
-!        this rank actually owns it. probes(idx) % active reflects GLOBAL
-!        ownership (set true by Probe_LookInOtherPartitions on every rank
-!        once ANY rank finds the point), so on a non-owning rank eID is
-!        left at whatever FindPointWithCoords set it to on local failure
-!        and must never be handed to FindPointWithCoords as a hint - doing
-!        so indexes mpi_partition % global2localeid out of bounds.
-!        --------------------------------------------------------------------
-         if ( probes(idx) % active .and. probes(idx) % rank .eq. MPI_Process % rank ) then
-            prev_eID = probes(idx) % eID
-         end if
+         foundLocal(nFound) = mesh % FindPointWithCoords(allX(:,nFound), eID_local(nFound), &
+                                                           xi_local(:,nFound), eID_hint=prev_eID_local)
+         if ( foundLocal(nFound) ) prev_eID_local = eID_local(nFound)
 
          deallocate(tokens)
       end do
 
       close(fID)
+!
+!     Resolve, for EVERY file-probe at once, which rank owns it with a
+!     single bulk MPI collective - not one mpi_allgather per probe (the
+!     original Probe_LookInOtherPartitions path), which at O(1e6) probes
+!     and O(1e3) ranks turned initialization into millions of tiny
+!     sequential collectives instead of one.
+!     --------------------------------------------------------------------
+      do i = 1, nFound
+         if ( foundLocal(i) ) then
+            ownerCandidate(i) = MPI_Process % rank
+         else
+            ownerCandidate(i) = -1
+         end if
+      end do
+
+#ifdef _HAS_MPI_
+      if ( MPI_Process % doMPIAction ) then
+         call MPI_Allreduce(ownerCandidate, globalOwner, nFound, MPI_INTEGER, MPI_MAX, MPI_COMM_WORLD, ierr)
+      else
+         globalOwner = ownerCandidate
+      end if
+#else
+      globalOwner = ownerCandidate
+#endif
+!
+!     Pass 2: finalize each probe (Lagrange weights, ASCII header, ...)
+!     now that ownership is known - no further communication needed.
+!     --------------------------------------------------------------------
+      idx = offset
+      do i = 1, nFound
+         idx = idx + 1
+         write(pname,'(A,I0)') "probe_", idx
+
+         call probes(idx) % Initialization( mesh, idx, solution_file, FirstCall, &
+                                             x_in = allX(:,i), variables_in = variables, name_in = trim(pname), &
+                                             isFileProbe_in = .true., outputFormat_in = trim(outputFormat), &
+                                             ownershipResolved_in = .true., &
+                                             eID_in = eID_local(i), xi_in = xi_local(:,i), &
+                                             active_in = (globalOwner(i) .ge. 0), &
+                                             rank_in = max(globalOwner(i), 0) )
+         probes(idx) % saveTimestep = saveTimestep
+      end do
 
    end subroutine InitializeProbesFromFile
 

@@ -55,7 +55,7 @@ module ProbeClass
 
    contains
 
-      subroutine Probe_Initialization(self, mesh, ID, solution_file, FirstCall, x_in, variables_in, name_in, isFileProbe_in, outputFormat_in, eID_hint)
+      subroutine Probe_Initialization(self, mesh, ID, solution_file, FirstCall, x_in, variables_in, name_in, isFileProbe_in, outputFormat_in, eID_hint, ownershipResolved_in, eID_in, xi_in, active_in, rank_in)
          use ParamfileRegions
          use MPI_Process_Info
          use Utilities, only: toLower
@@ -72,6 +72,21 @@ module ProbeClass
          character(len=*),  intent(in), optional :: outputFormat_in
          integer,           intent(in), optional :: eID_hint
 !
+!        When ownershipResolved_in is present and true, the caller has
+!        already done the local FindPointWithCoords search AND the global
+!        ownership resolution for a whole batch of probes with a single
+!        bulk MPI collective (see InitializeProbesFromFile), instead of
+!        this routine doing its own FindPointWithCoords + an individual
+!        LookInOtherPartitions MPI_Allgather per probe. eID_in/xi_in/
+!        active_in/rank_in then carry that pre-resolved result in and all
+!        four must be present.
+!        --------------------------------------------------------------
+         logical,           intent(in), optional :: ownershipResolved_in
+         integer,           intent(in), optional :: eID_in
+         real(kind=RP),     intent(in), optional :: xi_in(NDIM)
+         logical,           intent(in), optional :: active_in
+         integer,           intent(in), optional :: rank_in
+!
 !        ---------------
 !        Local variables
 !        ---------------
@@ -83,6 +98,7 @@ module ProbeClass
          character(len=STR_LEN_MONITORS)  :: coordinates
          character(len=STR_LEN_MONITORS)  :: variable
          character(len=STR_LEN_MONITORS)  :: outputFormat
+         character(len=STR_LEN_MONITORS)  :: varNameLower
 
          self % isFileProbe = .false.
          if ( present(isFileProbe_in) ) self % isFileProbe = isFileProbe_in
@@ -108,8 +124,16 @@ module ProbeClass
                self % monitorName = name_in
                self % x           = x_in
                self % nVars       = size(variables_in)
-               allocate( self % variableNames(self % nVars) )
-               self % variableNames = variables_in
+!
+!              File-probes never keep a private variableNames(:) copy: it is
+!              only read (below, and once more for the ASCII header) during
+!              this very Initialization call, directly off variables_in, and
+!              never again afterwards (the per-timestep file-probe path uses
+!              the shared Monitor_t % probesVariables / fp_varCodes instead,
+!              see Monitors.f90). At O(1e6) probes this private copy
+!              (nVars * STR_LEN_MONITORS bytes each) was the single largest
+!              per-probe allocation, replicated on every MPI rank.
+!              --------------------------------------------------------------
 
             else
 !
@@ -144,9 +168,23 @@ module ProbeClass
 !           Check the variables
 !           --------------------
             do v = 1, self % nVars
-            call tolower(self % variableNames(v))
+!
+!           File-probes: validate straight off variables_in(v), without
+!           mutating it (it is intent(in)) or persisting a lowered copy.
+!           Inline probes: unchanged, validated off the stored variableNames(v).
+!           --------------------------------------------------------------
+            if ( present(x_in) ) then
+               varNameLower = variables_in(v)
+               call tolower(varNameLower)
+            else
+!              Inline probes: lower self % variableNames(v) in place, as
+!              before - Probe_Update's dispatch (and the status print below)
+!              read this persisted, lower-cased value later.
+               call tolower(self % variableNames(v))
+               varNameLower = self % variableNames(v)
+            end if
 
-            select case ( trim(self % variableNames(v)) )
+            select case ( trim(varNameLower) )
 #ifdef NAVIERSTOKES
             case ("pressure")
             case ("velocity")
@@ -157,7 +195,7 @@ module ProbeClass
             case ("k")
             case ("rho")
             case default
-               print*, 'Probe variable "',trim(self % variableNames(v)),'" not implemented.'
+               print*, 'Probe variable "',trim(varNameLower),'" not implemented.'
                print*, "Options available are:"
                print*, "   * pressure"
                print*, "   * velocity"
@@ -177,7 +215,7 @@ module ProbeClass
             case ("w")
             case ("rho")
             case default
-               print*, 'Probe variable "',trim(self % variableNames(v)),'" not implemented.'
+               print*, 'Probe variable "',trim(varNameLower),'" not implemented.'
                print*, "Options available are:"
                print*, "   * pressure"
                print*, "   * velocity"
@@ -191,7 +229,7 @@ module ProbeClass
             case ("static-pressure")
 
             case default
-               print*, 'Probe variable "',trim(self % variableNames(v)),'" not implemented.'
+               print*, 'Probe variable "',trim(varNameLower),'" not implemented.'
                print*, "Options available are:"
                print*, "   * static-pressure"
 
@@ -204,7 +242,7 @@ module ProbeClass
             case ("v")
             case ("w")
             case default
-               print*, 'Probe variable "',trim(self % variableNames(v)),'" not implemented.'
+               print*, 'Probe variable "',trim(varNameLower),'" not implemented.'
                print*, "Options available are:"
                print*, "   * pressure"
                print*, "   * velocity"
@@ -216,13 +254,22 @@ module ProbeClass
             end do
 
 !
-!           Find the requested point in the mesh (use hint for local search if available)
+!           Find the requested point in the mesh (use hint for local search if
+!           available), and resolve which rank owns it - unless the caller
+!           already did both in bulk for this whole probe batch.
 !           ---------------------------------------------------------------------------
-            self % active = mesh % FindPointWithCoords(self % x, self % eID, self % xi, eID_hint=eID_hint)
+            if ( present(ownershipResolved_in) .and. ownershipResolved_in ) then
+               self % eID    = eID_in
+               self % xi     = xi_in
+               self % active = active_in
+               self % rank   = rank_in
+            else
+               self % active = mesh % FindPointWithCoords(self % x, self % eID, self % xi, eID_hint=eID_hint)
 !
-!           Check whether the probe is located in other partition
-!           -----------------------------------------------------
-            call self % LookInOtherPartitions
+!              Check whether the probe is located in other partition
+!              -----------------------------------------------------
+               call self % LookInOtherPartitions
+            end if
 !
 !           Disable the probe if the point is not found
 !           -------------------------------------------
@@ -312,7 +359,13 @@ module ProbeClass
             write( fID , * )
             write( fID , '(A10,2X,A24)' , advance = "no") "Iteration" , "Time"
             do v = 1 , self % nVars
-               write( fID , '(2X,A24)' , advance = "no") trim(self % variableNames(v))
+!              File-probes have no persisted variableNames(:) (see above) -
+!              read the header names straight off variables_in instead.
+               if ( present(x_in) ) then
+                  write( fID , '(2X,A24)' , advance = "no") trim(variables_in(v))
+               else
+                  write( fID , '(2X,A24)' , advance = "no") trim(self % variableNames(v))
+               end if
             end do
             write( fID , * )
 
@@ -892,8 +945,10 @@ module ProbeClass
          to % monitorName = from % monitorName
 
          safedeallocate ( to % variableNames )
-         allocate ( to % variableNames ( size(from % variableNames) ) )
-         to % variableNames = from % variableNames
+         if ( allocated(from % variableNames) ) then
+            allocate ( to % variableNames ( size(from % variableNames) ) )
+            to % variableNames = from % variableNames
+         end if
 
       end subroutine Probe_Assign
       
