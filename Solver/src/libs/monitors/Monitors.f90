@@ -286,7 +286,8 @@ module MonitorsClass
                Nmax_loc = 0
                do ii = 1, no_of_fileProbes
                   pidx = fp_offset_loc + ii
-                  if ( Monitors % probes(pidx) % rank .eq. MPI_Process % rank ) then
+                  if ( Monitors % probes(pidx) % active .and. &
+                       Monitors % probes(pidx) % rank .eq. MPI_Process % rank ) then
                      Monitors % fp_nOwned = Monitors % fp_nOwned + 1
                      Nmax_loc = max(Nmax_loc, maxval(mesh % elements(Monitors % probes(pidx) % eID) % Nxyz))
                   end if
@@ -323,7 +324,8 @@ module MonitorsClass
                Monitors % fp_nOwned = 0
                do ii = 1, no_of_fileProbes
                   pidx = fp_offset_loc + ii
-                  if ( Monitors % probes(pidx) % rank .eq. MPI_Process % rank ) then
+                  if ( Monitors % probes(pidx) % active .and. &
+                       Monitors % probes(pidx) % rank .eq. MPI_Process % rank ) then
                      Monitors % fp_nOwned = Monitors % fp_nOwned + 1
                      Monitors % fp_ownedIdx(Monitors % fp_nOwned) = pidx
                      Monitors % fp_cpu_eID(Monitors % fp_nOwned)   = Monitors % probes(pidx) % eID
@@ -1914,7 +1916,7 @@ end subroutine getNoOfMonitors
                                              ownershipResolved_in = .true., &
                                              eID_in = eID_local(i), xi_in = xi_local(:,i), &
                                              active_in = (globalOwner(i) .ge. 0), &
-                                             rank_in = max(globalOwner(i), 0) )
+                                             rank_in = globalOwner(i) )
          probes(idx) % saveTimestep = saveTimestep
       end do
 
