@@ -979,6 +979,23 @@ module MonitorsClass
          to % probes = from % probes
 #endif
 
+!
+!        File-probe SoA buffers: fp_nOwned/fp_ownedIdx/fp_buf are used by
+!        the CPU path (Monitor_ComputeFileProbesCPU, Monitor_UpdateFileProbes's
+!        Allreduce); fp_cpu_*/fp_eID+friends are each build's own per-probe
+!        arrays. None of this was copied before, so any 'to' object that
+!        goes on to call the file-probe update path (e.g. a DGSem copy used
+!        for truncation-error/load-balancing estimation) would hit
+!        unallocated arrays there - a real crash, not just a stale-data bug.
+!        --------------------------------------------------------------------
+         to % fp_nOwned = from % fp_nOwned
+         if ( allocated(from % fp_ownedIdx) ) then
+            safedeallocate(to % fp_ownedIdx) ; allocate(to % fp_ownedIdx(size(from % fp_ownedIdx))) ; to % fp_ownedIdx = from % fp_ownedIdx
+         end if
+         if ( allocated(from % fp_buf) ) then
+            safedeallocate(to % fp_buf) ; allocate(to % fp_buf(size(from % fp_buf))) ; to % fp_buf = from % fp_buf
+         end if
+
 #ifdef _OPENACC
          to % fp_Nmax = from % fp_Nmax
          if ( allocated(from % fp_eID) ) then
@@ -989,6 +1006,17 @@ module MonitorsClass
             safedeallocate(to % fp_lzeta)     ; allocate(to % fp_lzeta(size(from%fp_lzeta,1),size(from%fp_lzeta,2))) ; to % fp_lzeta     = from % fp_lzeta
             safedeallocate(to % fp_varCodes)  ; allocate(to % fp_varCodes(size(from % fp_varCodes)))   ; to % fp_varCodes  = from % fp_varCodes
             safedeallocate(to % fp_values_gpu); allocate(to % fp_values_gpu(size(from%fp_values_gpu,1),size(from%fp_values_gpu,2))) ; to % fp_values_gpu = from % fp_values_gpu
+         end if
+#else
+         if ( allocated(from % fp_cpu_eID) ) then
+            safedeallocate(to % fp_cpu_eID)      ; allocate(to % fp_cpu_eID(size(from % fp_cpu_eID)))           ; to % fp_cpu_eID      = from % fp_cpu_eID
+            safedeallocate(to % fp_cpu_Nx)       ; allocate(to % fp_cpu_Nx(size(from % fp_cpu_Nx)))             ; to % fp_cpu_Nx       = from % fp_cpu_Nx
+            safedeallocate(to % fp_cpu_Ny)       ; allocate(to % fp_cpu_Ny(size(from % fp_cpu_Ny)))             ; to % fp_cpu_Ny       = from % fp_cpu_Ny
+            safedeallocate(to % fp_cpu_Nz)       ; allocate(to % fp_cpu_Nz(size(from % fp_cpu_Nz)))             ; to % fp_cpu_Nz       = from % fp_cpu_Nz
+            safedeallocate(to % fp_cpu_lxi)      ; allocate(to % fp_cpu_lxi(size(from%fp_cpu_lxi,1),size(from%fp_cpu_lxi,2)))       ; to % fp_cpu_lxi      = from % fp_cpu_lxi
+            safedeallocate(to % fp_cpu_leta)     ; allocate(to % fp_cpu_leta(size(from%fp_cpu_leta,1),size(from%fp_cpu_leta,2)))     ; to % fp_cpu_leta     = from % fp_cpu_leta
+            safedeallocate(to % fp_cpu_lzeta)    ; allocate(to % fp_cpu_lzeta(size(from%fp_cpu_lzeta,1),size(from%fp_cpu_lzeta,2)))   ; to % fp_cpu_lzeta    = from % fp_cpu_lzeta
+            safedeallocate(to % fp_cpu_varCodes) ; allocate(to % fp_cpu_varCodes(size(from % fp_cpu_varCodes))) ; to % fp_cpu_varCodes = from % fp_cpu_varCodes
          end if
 #endif
 
