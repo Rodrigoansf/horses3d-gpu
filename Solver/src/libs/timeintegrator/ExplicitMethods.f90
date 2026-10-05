@@ -1199,12 +1199,12 @@ MODULE ExplicitMethods
          end if
 
          ! Pass 2
-         pavg = 0.0_RP
+         pavg = gm1 * (qavg(5) - 0.5_RP * sum(qavg(2:4)**2) / qavg(1))
          minp = huge(1.0_RP)
 
          if (do_rho_limit) then
             !$acc loop vector collapse(3)                &
-            !$acc& reduction(+:pavg) reduction(min:minp) &
+            !$acc& reduction(min:minp)                  &
             !$acc& private(rho, rho_limited, q2, q3, q4, q5, p)
             do k = 0, Nz; do j = 0, Ny; do i = 0, Nx
                rho = Q(1,i,j,k)
@@ -1217,15 +1217,11 @@ MODULE ExplicitMethods
 
                p = gm1 * (q5 - 0.5_RP * (q2*q2 + q3*q3 + q4*q4) / rho_limited)
 
-               pavg = pavg + p * NodalStorage(Nx) % w(i) * &
-                                 NodalStorage(Ny) % w(j) * &
-                                 NodalStorage(Nz) % w(k) * &
-                                 e % geom % jacobian(i,j,k)
                minp = min(p, minp)
             end do; end do; end do
          else
             !$acc loop vector collapse(3)                &
-            !$acc& reduction(+:pavg) reduction(min:minp) &
+            !$acc& reduction(min:minp)                  &
             !$acc& private(rho, q2, q3, q4, q5, p)
             do k = 0, Nz ; do j = 0, Ny ; do i = 0, Nx
                rho = Q(1,i,j,k)
@@ -1234,15 +1230,9 @@ MODULE ExplicitMethods
                q4  = Q(4,i,j,k)
                q5  = Q(5,i,j,k)
                p = gm1 * (q5 - 0.5_RP * (q2*q2 + q3*q3 + q4*q4) / rho)
-               pavg = pavg + p * NodalStorage(Nx) % w(i) * &
-                                 NodalStorage(Ny) % w(j) * &
-                                 NodalStorage(Nz) % w(k) * &
-                                 e % geom % jacobian(i,j,k)
                minp = min(p, minp)
             end do; end do; end do
          end if
-
-         pavg = pavg / vol
 
          theta_p    = 1.0_RP
          do_p_limit = .false.
