@@ -98,6 +98,23 @@ module VolumeIntegrals
 !        Initialization
 !        --------------
          val = 0.0_RP
+#if defined(_OPENACC) && defined(NAVIERSTOKES) && (!(SPALARTALMARAS))
+!
+!        These integrals are evaluated on the host and need the current QDot
+!        (and gradients for the balances), which UpdateHostData does not bring back
+!        -------------------------------------------------------------------------
+         select case (integralType)
+         case (KINETIC_ENERGY_RATE, KINETIC_ENERGY_BALANCE, ENTROPY_RATE, ENTROPY_BALANCE)
+            !$acc wait
+            do eID = 1, mesh % no_of_elements
+               !$acc update self(mesh % elements(eID) % storage % Q, mesh % elements(eID) % storage % QDot) if_present
+               if (integralType == KINETIC_ENERGY_BALANCE .or. integralType == ENTROPY_BALANCE) then
+                  !$acc update self(mesh % elements(eID) % storage % U_x, mesh % elements(eID) % storage % U_y, &
+                  !$acc& mesh % elements(eID) % storage % U_z, mesh % elements(eID) % storage % mu_ns) if_present
+               end if
+            end do
+         end select
+#endif
 !
 !        Loop the mesh
 !        -------------
