@@ -1205,6 +1205,7 @@ module SpatialDiscretization
       subroutine TimeDerivative_StrongVolumetricContribution(mesh, e, t)
          use HexMeshClass
          use ElementClass
+         use HyperbolicSplitForm, only: SplitDG_ComputeSplitFormFluxes
          implicit none
          type(HexMesh)             :: mesh
          type(Element)             :: e
@@ -1272,7 +1273,7 @@ module SpatialDiscretization
 !
 !           Compute sharp fluxes for skew-symmetric approximations
 !           ------------------------------------------------------
-            !call HyperbolicDiscretization % ComputeSplitFormFluxes(e, inviscidContravariantFlux, fSharp, gSharp, hSharp)
+            call SplitDG_ComputeSplitFormFluxes(e, inviscidContravariantFlux, fSharp, gSharp, hSharp)
 !
 !           Perform the Weak volume green integral
 !           --------------------------------------
