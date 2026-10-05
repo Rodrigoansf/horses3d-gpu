@@ -469,7 +469,7 @@ module SCsensorClass
 !     Add 'inertia' to the scaled value
 !     ---------------------------------
       if (sensor % min_steps > 1) then   ! Enter the loop only if necessary
-!$omp parallel do default(private) shared(sem)
+!$omp parallel do default(private) shared(sem, sensor)
          do eID = 1, sem % mesh % no_of_elements
             e => sem % mesh % elements(eID)
             s = e % storage % sensor
@@ -846,7 +846,7 @@ module SCsensorClass
 !
 !     Maximum TE computation
 !     ----------------------
-!$omp parallel do default(private) shared(sem, csem)
+!$omp parallel do default(private) shared(sem, csem, sensor, t, NodalStorage, thermodynamics, dimensionless, refValues)
       do eID = 1, sem % mesh % no_of_elements
 
          e  => sem % mesh % elements(eID)
