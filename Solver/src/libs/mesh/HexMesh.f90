@@ -4593,10 +4593,13 @@ slavecoord:             DO l = 1, 4
          !$acc enter data copyin(self % zones(zoneID) % toBeDeleted)     
       enddo
 
-      DO i = 0, self % Nx(1) !it should be the maximum nX
+      DO i = 0, ubound(NodalStorage,1)
+         if (.not. NodalStorage(i) % Constructed) cycle
          !$acc enter data copyin(NodalStorage(i))
          !$acc enter data copyin(NodalStorage(i) % hatD)
-         !$acc enter data copyin(NodalStorage(i) % sharpD)
+         if (allocated(NodalStorage(i) % sharpD)) then
+            !$acc enter data copyin(NodalStorage(i) % sharpD)
+         end if
          !$acc enter data copyin(NodalStorage(i) % D)
          !$acc enter data copyin(NodalStorage(i) % b)
          !$acc enter data copyin(NodalStorage(i) % v)
@@ -4747,12 +4750,17 @@ slavecoord:             DO l = 1, 4
          !$acc exit data delete (self % zones(zoneID) % toBeDeleted)     
       enddo
 
-      DO i = 0, self % Nx(1) !it should be the maximum nX
+      DO i = 0, ubound(NodalStorage,1)
+         if (.not. NodalStorage(i) % Constructed) cycle
          !$acc exit data delete (NodalStorage(i) % hatD)
-         !$acc exit data delete (NodalStorage(i) % sharpD)
+         if (allocated(NodalStorage(i) % sharpD)) then
+            !$acc exit data delete (NodalStorage(i) % sharpD)
+         end if
          !$acc exit data delete (NodalStorage(i) % D)
          !$acc exit data delete (NodalStorage(i) % b)
          !$acc exit data delete (NodalStorage(i) % v)
+         !$acc exit data delete (NodalStorage(i) % w)
+         !$acc exit data delete (NodalStorage(i) % x)
          !$acc exit data delete (NodalStorage(i))
       END DO
 
