@@ -490,7 +490,10 @@ module SpatialDiscretization
 !$acc end parallel loop
 !$omp end do nowait
 
+!        computeBoundaryFlux has no work-sharing of its own: run it on one thread
+!$omp single
          call computeBoundaryFlux(mesh, t)
+!$omp end single
 !
 !        ***************************************************************
 !        Surface integrals and scaling of elements with non-shared faces
@@ -811,7 +814,10 @@ module SpatialDiscretization
       end do
 !$omp end do nowait
 
+!        computeBoundaryFlux has no work-sharing of its own: run it on one thread
+!$omp single
          call computeBoundaryFlux(mesh, t)
+!$omp end single
 !
 !        ***************************************************************
 !        Surface integrals and scaling of elements with non-shared faces
