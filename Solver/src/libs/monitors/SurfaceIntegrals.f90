@@ -313,7 +313,7 @@ module SurfaceIntegrals
          case ( TOTAL_FORCE )
 
 !$acc parallel loop gang present(mesh) num_gangs(mesh % zones(zoneID) % no_of_faces) reduction(+:valx, valy, valz)
-!$omp parallel do private(fID,localVal,localx,localy,localz) reduction(+:valx, valy, valz) schedule(runtime)
+!$omp parallel do private(fID,localVal,localx,localy,localz,p,tau) reduction(+:valx, valy, valz) schedule(runtime)
          do zonefID = 1, mesh % zones(zoneID) % no_of_faces
             !
             !           Face global ID
@@ -358,7 +358,7 @@ module SurfaceIntegrals
          case ( PRESSURE_FORCE )
 
 !$acc parallel loop gang present(mesh) num_gangs(mesh % zones(zoneID) % no_of_faces) reduction(+:valx, valy, valz) 
-!$omp parallel do private(fID,localVal,localx,localy,localz) reduction(+:valx, valy, valz) schedule(runtime)
+!$omp parallel do private(fID,localVal,localx,localy,localz,p) reduction(+:valx, valy, valz) schedule(runtime)
          do zonefID = 1, mesh % zones(zoneID) % no_of_faces
             !
             !           Face global ID
@@ -401,7 +401,7 @@ module SurfaceIntegrals
          case ( VISCOUS_FORCE )
 
 !$acc parallel loop gang present(mesh) num_gangs(mesh % zones(zoneID) % no_of_faces) reduction(+:valx, valy, valz)
-!$omp parallel do private(fID,localVal,localx,localy,localz) reduction(+:valx, valy, valz) schedule(runtime)
+!$omp parallel do private(fID,localVal,localx,localy,localz,tau,val) reduction(+:valx, valy, valz) schedule(runtime)
          do zonefID = 1, mesh % zones(zoneID) % no_of_faces
             !
             !           Face global ID
