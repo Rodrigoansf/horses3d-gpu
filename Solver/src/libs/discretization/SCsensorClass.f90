@@ -351,7 +351,11 @@ module SCsensorClass
       end do
 !$omp end parallel do
 
-      call sensor % TEestim % coarseSem % mesh % pAdapt(N, controlVariables)
+      if (MPI_Process % doMPIAction) then
+         call sensor % TEestim % coarseSem % mesh % pAdapt_MPI(N, controlVariables)
+      else
+         call sensor % TEestim % coarseSem % mesh % pAdapt(N, controlVariables)
+      end if
       call sensor % TEestim % coarseSem % mesh % storage % PointStorage()
 !
 !     Update the SVV if active
