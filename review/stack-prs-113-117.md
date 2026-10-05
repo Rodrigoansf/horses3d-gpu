@@ -201,7 +201,7 @@ were run on the same tests:
 | Euler/BoxAroundCircle_pAdapted | segfault while the time integrator is set up | same segfault |
 
 TaylorGreenSVVLES and BoxAroundCircle_pAdapted are only in the old CPU
-workflows. Both already fail on `develop`.
+workflows (not implemented in the GPU repo yet). Both already fail on `develop`.
 
 **Do the assert-changing commits fail the original asserts?**
 
@@ -215,6 +215,35 @@ workflows. Both already fail on `develop`.
 So the original asserts encode the current limiter and the current `divV`
 expression. Taking either change means either the reference code has the same
 bug and both are fixed, or the change is wrong.
+
+## Comparison with legacy horses3d (horses-framework/horses3d, master 586919b)
+
+Legacy was built and run on CPU (gfortran 13, serial and OpenMPI 4.1 with 64
+ranks like its CI). Each questionable change was also applied to legacy and
+legacy's own tests were rerun.
+
+### Changes that alter results
+
+| Change | Legacy code | Legacy tests | Verdict |
+|---|---|---|---|
+| Positivity limiter p(q_avg) | Same formula as `develop` (mean nodal pressure), with the comment "Jensen's inequality is NOT conservative for the pressure", so it is a deliberate choice | Legacy's only limiter test, ForwardFacingStep_SSPRK33 (active CI), passes with and without the change, and the final solution is bit-identical: the pressure branch never fires in 10 steps. `LimiterTest` exists only in the GPU repo. | **Moves away from legacy.** Not a bug in legacy, which only over-limits. Drop it, or treat it as a numerics change to be made in legacy first. |
+| SVV `divV` index (energy gradient variables) | Identical wrong line `divV = Hx(IX) + Hy(IY) + Hz(IZ)` and identical layout (velocities at IRHOU:IRHOW) | TaylorGreenSVVLES (active legacy CI): legacy passes 8/8; legacy + fix fails 5/8 with values identical to `GMM_develop` + fix (e.g. 0.12704234777396151) | **A real bug in both codes.** Fixing it here moves away from legacy's asserts. Fix it in legacy first and re-baseline there, then port. |
+| MU `"source"` volume monitor | Legacy's multiphase VolumeMonitor already has `"source"` (same code; only the case order and the help-text capitalisation differ) | Legacy passes Multiphase/ActuatorLineInterpolation 10/10 with 64 MPI ranks. The GPU repo with the monitor gives NaN for all asserted values with 64 ranks (multiphase + MPI not implemented), and in serial it cannot match references generated with 64 ranks. | **The monitor brings the repo closer to legacy.** The stack's early `return` in the test ProblemFile is **not** in legacy and should be dropped. |
+
+### `ready` fixes (no result changes), against legacy
+
+| Fix | Legacy | Meaning |
+|---|---|---|
+| `Face_Assign` deep copy | Legacy deep-copies (`to%geom = from%geom`) | Bug introduced in the GPU port; the fix restores legacy behaviour |
+| Strong-form split fluxes | Legacy calls `ComputeSplitFormFluxes` | Port bug; fix restores legacy |
+| ActuatorLine `newPointToFind` | Array does not exist in legacy (the MPI point search is GPU-repo code) | GPU-repo bug |
+| ActuatorLine OpenMP construct | Legacy still declares `Q, Qtemp` | Port bug (declarations commented out in the GPU repo); fix restores a compiling threaded build |
+| Boundary flux `!$omp single` | Legacy calls `computeBoundaryFlux` per face inside an `!$omp do` | Port bug (the GPU repo moved the face loop inside the routine); the fix is correct but serialises the loop on CPU |
+| Monitor OpenMP privates | Legacy uses orphaned `!$omp do` with a different variable set | Port bug (the GPU repo switched to `parallel do`) |
+| TE sensor `x(:,i,j,k)` + `S = 0` | Same bug in legacy | Bug in both; the fix moves away from legacy (no legacy test uses the TE sensor) |
+| TE sensor `pAdapt_MPI` | Same call in legacy, same "does not work with MPI" comment | Bug in both |
+| Sensor `default(private)` shared lists | Same lists in legacy | Bug in both (threaded builds only) |
+| NodalStorage device mapping | No equivalent (GPU only) | GPU-only bug |
 
 ## Is every picked commit a real bug fix?
 
