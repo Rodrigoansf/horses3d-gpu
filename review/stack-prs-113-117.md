@@ -33,7 +33,40 @@ changes are marked "out of scope".
 | **Regression (discard)** | `#ifdef _OPENACC` wrapping of directives (dead code); GPU IBM wall-function step compiled out; revert of #92 and #97 (both on `main`); N>0 guards inside ACC loops; split-form kernel copied 7× via `#include`; host round-trips of the whole mesh every RHS for AV/SVV; AviscFlux added after the BC on boundary faces; unexplained 3× change of ForwardFacingStepSVV reference residuals |
 | **New but not mergeable as is** | GPU wall distance, SVV port to GPU, TE sensor on GPU |
 
-## Candidate branches (in Rodrigoansf/horses3d-gpu)
+## Branches to use (in Rodrigoansf/horses3d-gpu)
+
+| Branch | Base | Commits | Content |
+|---|---|---|---|
+| **`stack-pick/ready`** | `develop` | 10 | Confirmed bug fixes, ready to PR. None of them touches a test file or changes a value any active test asserts. |
+| **`stack-pick/needs-analysis`** | `stack-pick/ready` | 5 | Changes to look at slowly. Each commit message starts with `NEEDS ANALYSIS:` and says why. |
+
+`ready`:
+1. `Face_Assign` deep copy
+2. NodalStorage device mapping
+3. ActuatorLine unallocated assignment
+4. Strong-form split fluxes
+5. TE sensor `x(:,i,j,k)` and `S = 0`
+6. TE sensor `pAdapt_MPI`
+7. OpenMP: boundary flux on one thread
+8. OpenMP: `shared` lists in the sensor loops
+9. OpenMP: actuator-line construct (makes `ENABLE_THREADS=YES` compile)
+10. OpenMP: privatised monitor temporaries
+
+`needs-analysis`:
+- `exit data delete(sem)`: unverified.
+- SVV `divV`: changes TaylorGreenSVVLES results.
+- Positivity limiter: changes LimiterTest asserts.
+- Monitor refresh: partial fix.
+- MU `"source"` monitor: a feature, and it edits a test.
+
+The test asserts come from the reference code. A commit that changes an asserted
+value is only acceptable if the reference code has the same bug, so the limiter
+and the SVV `divV` change both need a comparison against the reference code first.
+
+The per-topic branches below are kept for reference; `ready` + `needs-analysis`
+supersede them.
+
+## Per-topic candidate branches (superseded)
 
 All commits keep zalbanob as author, with a message saying which stack layer
 they come from. Each commit is self-contained and can be cherry-picked on its own.
