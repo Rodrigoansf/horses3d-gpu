@@ -208,7 +208,7 @@ workflows. Both already fail on `develop`.
 | Commit | Test | Result with the original asserts |
 |---|---|---|
 | Positivity limiter (#115) | LimiterTest | **Fails 7/8** (all residuals, Cd, Cl). It passes only with the author's new values. |
-| SVV `divV` fix | TaylorGreenSVVLES on `GMM_develop` | `GMM_develop` **passes 8/8**; with the fix it **fails 5/8** (residuals off by 1e-6 to 1e-3 relative). The failing values match the stack's new reference values, so that part of the stack's assert change is exactly this fix. |
+| SVV `divV` fix | TaylorGreenSVVLES on `GMM_develop` | `GMM_develop` **passes 8/8**; with the fix it **fails 5/8** (residuals off by 2e-4 to 1.6e-2 relative). The failing values match the stack's new reference values, so that part of the stack's assert change is exactly this fix. |
 | SVV `divV` fix | TaylorGreenSVVLES on `develop` | No effect: results are bit-identical with and without it, because SVV is never applied on `develop`'s NS path (as noted in `GMM_develop`). |
 | MU `"source"` monitor | Multiphase/ActuatorLineInterpolation | Without it the run aborts at start-up (unknown monitor). With it the run completes but **5/10 asserts fail by 1e-10 to 1e-7 relative**, on residuals and forces the monitor cannot affect, so the case looks stale on `develop` (it is commented out in CI). |
 
