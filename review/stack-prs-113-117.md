@@ -54,7 +54,7 @@ changes are marked "out of scope".
 
 `needs-analysis`:
 - `exit data delete(sem)`: unverified.
-- SVV `divV`: changes TaylorGreenSVVLES results.
+- SVV `divV`: changes TaylorGreenSVVLES results on `GMM_develop` and breaks its original asserts (no effect on `develop`).
 - Positivity limiter: changes LimiterTest asserts.
 - Monitor refresh: partial fix.
 - MU `"source"` monitor: a feature, and it edits a test.
@@ -183,6 +183,38 @@ and the undeclared `Q`/`Qtemp` in `ActuatorLine.f90`. This branch fixes that and
 The `#ifdef _OPENACC` guards the stack wrapped around these were dropped. The
 remaining known issue is the shared `pointsToFind` counter in the actuator-line
 search (MPI path).
+
+## Test evidence (CPU, gfortran 13, original asserts unless stated)
+
+There is no GPU in this container (no NVIDIA device, no nvfortran), so nothing ran
+on GPU. All runs are serial CPU builds.
+
+**Does `ready` change any asserted value?** No. `develop` and `stack-pick/ready`
+were run on the same tests:
+
+| Test | develop | ready |
+|---|---|---|
+| NavierStokes/TaylorGreen | 8/8 pass | 8/8 pass, identical residuals |
+| NavierStokes/Cylinder | 9/9 pass | 9/9 pass, identical residuals |
+| NavierStokes/LimiterTest | 8/8 pass | 8/8 pass, identical residuals |
+| NavierStokes/TaylorGreenSVVLES | 5/8 fail | 5/8 fail, bit-identical values |
+| Euler/BoxAroundCircle_pAdapted | segfault while the time integrator is set up | same segfault |
+
+TaylorGreenSVVLES and BoxAroundCircle_pAdapted are only in the old CPU
+workflows. Both already fail on `develop`.
+
+**Do the assert-changing commits fail the original asserts?**
+
+| Commit | Test | Result with the original asserts |
+|---|---|---|
+| Positivity limiter (#115) | LimiterTest | **Fails 7/8** (all residuals, Cd, Cl). It passes only with the author's new values. |
+| SVV `divV` fix | TaylorGreenSVVLES on `GMM_develop` | `GMM_develop` **passes 8/8**; with the fix it **fails 5/8** (residuals off by 1e-6 to 1e-3 relative). The failing values match the stack's new reference values, so that part of the stack's assert change is exactly this fix. |
+| SVV `divV` fix | TaylorGreenSVVLES on `develop` | No effect: results are bit-identical with and without it, because SVV is never applied on `develop`'s NS path (as noted in `GMM_develop`). |
+| MU `"source"` monitor | Multiphase/ActuatorLineInterpolation | Without it the run aborts at start-up (unknown monitor). With it the run completes but **5/10 asserts fail by 1e-10 to 1e-7 relative**, on residuals and forces the monitor cannot affect, so the case looks stale on `develop` (it is commented out in CI). |
+
+So the original asserts encode the current limiter and the current `divV`
+expression. Taking either change means either the reference code has the same
+bug and both are fixed, or the change is wrong.
 
 ## Is every picked commit a real bug fix?
 
