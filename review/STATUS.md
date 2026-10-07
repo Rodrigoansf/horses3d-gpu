@@ -27,7 +27,7 @@ These bugs are GPU-only, or were introduced when porting from legacy; the fix re
 - Cylinder passes with 4 OpenMP threads.
 - TaylorGreenSVVLES on the GMM fix branch passes 8/8, as on `GMM_develop`.
 
-**Not yet run on GPU.** The local GPU test prompt below covers that.
+**GPU (RTX 3060 laptop, cc86):** both fix branches are bitwise identical to their bases on every single-GPU CI case (17 on develop, 19 on GMM), with the same efficiency within noise. Full report: `review/gpu-results-cc86.md` on branch `review/gpu-results`.
 
 ## 2. Bugs legacy has too: need discussion and tests
 
@@ -70,8 +70,22 @@ These bugs are GPU-only, or were introduced when porting from legacy; the fix re
 | Two-point flux chosen at run time inside the split kernel | The stack's 7 copies of the kernel via `#include` | Benchmark first on top of #92's fused kernel; specialise only if the `select case` cost shows up. |
 | TE sensor on GPU | The stack's Q/QDot round trips on every sensor evaluation | Low priority; design together with the AV path. |
 
+## 5. New bugs found by the GPU run (not fixed yet)
+
+| Bug | Where | Kind |
+|---|---|---|
+| Anisotropic orders (Nx≠Ny≠Nz) crash on the GPU in `HexMesh_ProlongSolToFaces`, even on a conforming mesh. The NodalStorage commit is necessary but not enough. | develop, GMM | GPU-only, cause not found yet |
+| p-nonconforming faces give NaN even on CPU: the port's `Face_AdaptSolToFace` only copies, and lost legacy's `projectionType`/`Tset` interpolation | develop, GMM | port bug (legacy works) |
+| GPU volume monitors frozen: kinetic energy stays at its initial value, kinetic-energy rate and enstrophy are 0 at every iteration | develop, GMM | GPU-only; fix on the device (section 4) |
+| SVV on GPU gives wrong results (TaylorGreenSVVLES 3/8): the host branch uses stale Q and gradients, and the element AV flux never reaches the device | GMM | GPU-only; a 7-line host round trip proves the cause (8/8), but the real fix is SVV on the device |
+| ForwardFacingStepSVV crashes on the GPU in `HexMesh_ComputeLocalGradientNS` | GMM | GPU-only, cause not found yet |
+| `make mu` does not compile on the GMM-based branches (`NSGradientVariables_selector` / `Q_grad_NS` under `-DMULTIPHASE`) | GMM | build bug |
+| About 7.2k device allocations never freed: unbalanced enter/exit data in `HexMesh_CreateDeviceData`; `geom%x` is copied in twice; multiphase `main` has no device cleanup | develop, GMM | GPU-only, harmless at exit |
+| `exit data delete(sem)` | develop | not needed for correctness; fold into the cleanup above |
+
 ## Branch map (fork)
 
 - **Use:** `fix/gpu-port-develop`, `fix/gpu-port-GMM`, `discuss/legacy-shared-bugs`.
 - **Reference only, superseded:** `stack-pick/*`, `zalbanob-stack/*`.
 - **Report:** `review/stack-prs-113-117.md` on `claude/eager-lamport-ymhyjk`.
+- **GPU results:** `review/gpu-results-cc86.md` on `review/gpu-results`.
