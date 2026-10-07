@@ -5693,7 +5693,9 @@ call elementMPIList % destruct
    end subroutine HexMesh_UpdateHOArrays
 
    subroutine HexMesh_ComputeLocalGradientNS(self, set_mu)
+#if defined(NAVIERSTOKES) && (!defined(SPALARTALMARAS))
       use VariableConversion, only: NSGradientVariables_selector
+#endif
       implicit none
       !-arguments-----------------------------------------
       type(HexMesh), intent(inout)    :: self
@@ -5720,6 +5722,7 @@ call elementMPIList % destruct
 !     "differentiate storage % Q directly" branch for STATE here -- nothing
 !     else in the dispatch chain needs to change.
 !     -------------------------------------------------------------------------
+#if defined(NAVIERSTOKES) && (!defined(SPALARTALMARAS))
 !$omp do schedule(runtime)
       !$acc parallel loop gang vector_length(128) present(self) async(1)
       do eID = 1 , size(self % elements)
@@ -5734,6 +5737,19 @@ call elementMPIList % destruct
       end do
       !$acc end parallel loop
 !$omp end do nowait
+#else
+!
+!     Physics without NSGradientVariables_selector (multiphase, NSSA, ...):
+!     differentiate the state directly, as on develop
+!     ---------------------------------------------------------------------
+!$omp do schedule(runtime)
+      !$acc parallel loop gang vector_length(128) present(self) async(1)
+      do eID = 1 , size(self % elements)
+         call HexElement_ComputeLocalGradient(self % elements(eID), NCONS, NGRAD, self % elements(eID) % storage % Q)
+      end do
+      !$acc end parallel loop
+!$omp end do nowait
+#endif
 
    end subroutine HexMesh_ComputeLocalGradientNS
 
