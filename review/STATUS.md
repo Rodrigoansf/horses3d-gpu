@@ -16,6 +16,7 @@ Minor fixes don't change results in anything that runs today. Each "change" bran
 | `change/svv-energy-divv` | `GMM_develop` | SVV `divV` index + TaylorGreenSVVLES references (same values as legacy) |
 | `change/te-sensor-source-term` | `GMM_develop` | TE sensor source term: right point, `S = 0` |
 | `change/limiter-pressure-reference` | `develop` | limiter uses p(q_avg); LimiterTest references updated (legacy reproduces both old and new) |
+| `fix/aliasing-sensor-realloc` | `develop` | aliasing sensor freed its scratch arrays when the next element had the same order (crash on 2nd element; legacy too) |
 
 **legacy horses3d** (fork Rodrigoansf/horses3d, base `master` `e23a7a2`):
 
@@ -25,6 +26,7 @@ Minor fixes don't change results in anything that runs today. Each "change" bran
 | `legacy/te-sensor-source-term` | TE sensor source term |
 | `legacy/svv-energy-divv` | SVV `divV` + TaylorGreenSVVLES references |
 | `legacy/limiter-pressure-reference` | limiter uses p(Qavg) |
+| `legacy/aliasing-sensor-realloc` | aliasing sensor scratch-array realloc (crash on 2nd element) |
 
 `legacy/te-sensor-padapt-mpi` and `legacy/sc-sensor-omp-shared` are superseded by `legacy/minor-fixes`. The proxy refused to delete them; delete by hand.
 

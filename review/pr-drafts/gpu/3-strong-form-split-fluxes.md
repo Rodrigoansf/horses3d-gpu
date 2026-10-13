@@ -39,7 +39,7 @@ So this changes results only where the old results were built on uninitialised m
 - CPU (gfortran 13): builds; `NavierStokes/Cylinder` 9/9.
 - GPU (laptop, earlier run of the first commit together with the minor fixes): 17 single-GPU CI cases bitwise identical to `develop`.
 - No test uses either path.
-- The aliasing sensor still can't run, in this code or in legacy master. It segfaults on the second element, before it reaches the line fixed here. Its scratch-array allocation logic deallocates `F, Fs, Gs, Hs` when the next element has the same order and never reallocates them. That is a separate bug, shared with legacy, and is not fixed in this PR.
+- The aliasing sensor still can't run, in this code or in legacy master. It segfaults on the second element, before it reaches the line fixed here. Its scratch-array allocation logic deallocates `F, Fs, Gs, Hs` when the next element has the same order and never reallocates them. That is a separate bug, shared with legacy, fixed in its own PR ("aliasing sensor: don't free the scratch arrays..."). With both PRs, the sensor gives the same values as legacy on a small case.
 
 ### Notes
 
