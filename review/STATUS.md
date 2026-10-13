@@ -1,4 +1,35 @@
-# Stack PRs #113–#117: where things stand (7 Oct 2026)
+# Stack PRs #113–#117: where things stand
+
+## 0. Current branches (13 Oct 2026): one PR per branch, nothing opened yet
+
+Everything below section 0 is the 7 Oct state. The branches named there (`fix/gpu-port-*`, `discuss/legacy-shared-bugs`, `stack-pick/*`) are **superseded** by the ones in this table. They are kept only because the laptop's round-2 task file refers to their commits.
+
+Minor fixes don't change results in anything that runs today. Each "change" branch changes results somewhere, so it is kept alone to be discussed on its own.
+
+**horses3d-gpu** (fork Rodrigoansf/horses3d-gpu):
+
+| Branch | Base | What |
+|---|---|---|
+| `fix/minor-develop` | `develop` | 9 commits: Face_Assign, NodalStorage mapping, enter/exit data balance, `sem` teardown, ActuatorLine guard, 3 OpenMP fixes, multiphase "source" monitor |
+| `fix/minor-GMM` | `GMM_develop` | 5 commits: Face_Assign, NodalStorage mapping, `make mu` build fix, TE sensor `pAdapt_MPI`, sensor OpenMP `shared` lists |
+| `change/strong-form-split-fluxes` | `develop` | split-form sharp fluxes never computed (port commented the call out), in the strong-form volume term and the aliasing sensor |
+| `change/svv-energy-divv` | `GMM_develop` | SVV `divV` index + TaylorGreenSVVLES references (same values as legacy) |
+| `change/te-sensor-source-term` | `GMM_develop` | TE sensor source term: right point, `S = 0` |
+| `change/limiter-pressure-reference` | `develop` | limiter uses p(q_avg); LimiterTest references updated (legacy reproduces both old and new) |
+
+**legacy horses3d** (fork Rodrigoansf/horses3d, base `master` `e23a7a2`):
+
+| Branch | What |
+|---|---|
+| `legacy/minor-fixes` | TE sensor `pAdapt_MPI` + sensor OpenMP `shared` lists (both crashes, reproduced) |
+| `legacy/te-sensor-source-term` | TE sensor source term |
+| `legacy/svv-energy-divv` | SVV `divV` + TaylorGreenSVVLES references |
+| `legacy/limiter-pressure-reference` | limiter uses p(Qavg) |
+
+`legacy/te-sensor-padapt-mpi` and `legacy/sc-sensor-omp-shared` are superseded by `legacy/minor-fixes`. The proxy refused to delete them; delete by hand.
+
+Note on the limiter: section 2 below says it was dropped. It is back as a *change* branch, to be discussed together with the legacy one. The new references are exactly what legacy produces with the same change.
+
 
 All work is on the fork, Rodrigoansf/horses3d-gpu. Nothing has been pushed to horses-framework.
 
