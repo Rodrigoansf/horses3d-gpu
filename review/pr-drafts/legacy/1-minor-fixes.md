@@ -1,6 +1,6 @@
 ## Truncation-error sensor: make it run with MPI and with OpenMP
 
-This PR fixes two crashes in the truncation-error (TE) shock sensor, one with MPI and one with OpenMP. In setups that already run, nothing changes: serial runs give the same results. It's one of four small, independent PRs that came out of reviewing the GPU version of HORSES3D. The other three change results and are kept separate so each can be discussed on its own.
+This PR fixes two crashes in the truncation-error (TE) shock sensor, one with MPI and one with OpenMP. In setups that already run, nothing changes: serial runs give the same results. It's one of five small, independent PRs that came out of reviewing the GPU version of HORSES3D. Three of the others change results; the fourth fixes a crash in a different sensor. Each is kept separate so it can be discussed on its own.
 
 There are two commits, one per fix. Both touch only `SCsensorClass.f90`.
 

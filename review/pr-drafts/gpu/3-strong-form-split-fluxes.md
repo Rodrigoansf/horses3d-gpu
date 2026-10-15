@@ -1,7 +1,5 @@
 ## Split form: compute the sharp fluxes again (strong-form volume term and aliasing sensor)
 
-**Base:** `develop` · **Branch:** `change/strong-form-split-fluxes` · 2 commits, 2 lines each · GPU-only bug (legacy is correct)
-
 ### What happened
 
 In legacy, the split form computes its "sharp" two-point fluxes with a type-bound call:
@@ -25,7 +23,7 @@ In both places, call the new routine, exactly as the main volume term does:
 call SplitDG_ComputeSplitFormFluxes(e, F, fSharp, gSharp, hSharp)
 ```
 
-One commit per place: the first is zalbanob's, from #116; the second applies the same fix to the sensor.
+One commit per place: the first is zalbanob's, from horses-framework/horses3d-gpu#116; the second applies the same fix to the sensor.
 
 ### Who is affected
 

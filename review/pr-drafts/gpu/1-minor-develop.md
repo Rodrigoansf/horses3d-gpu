@@ -1,8 +1,6 @@
 ## develop: minor fixes from the review of the stack PRs
 
-**Base:** `develop` · **Branch:** `fix/minor-develop` · 9 commits
-
-This PR collects the small fixes for `develop` that came out of reviewing the five stack PRs (#113–#117). None of them changes results in a case that runs today. They fix crashes, memory problems and OpenMP races, or they release GPU memory that was never freed. The two changes that *do* change results have their own PRs: "split form: compute the sharp fluxes again" and "positivity limiter".
+This PR collects the small fixes for `develop` that came out of reviewing the five stack PRs (horses-framework/horses3d-gpu#113 to horses-framework/horses3d-gpu#117). None of them changes results in a case that runs today. They fix crashes, memory problems and OpenMP races, or they release GPU memory that was never freed. The two changes that *do* change results have their own PRs: "split form: compute the sharp fluxes again" and "positivity limiter".
 
 Each commit stands on its own and has a full explanation in its message, so the easiest way to review is commit by commit. Below is the slow version, grouped by topic.
 
@@ -12,7 +10,7 @@ Nothing here adds host↔device transfers to the time loop. The GPU changes only
 
 ### 1. GPU device data (3 commits)
 
-**Map every NodalStorage order to the device** (`bd1c0a37`). `NodalStorage(N)` holds the quadrature nodes, weights and derivative matrices for polynomial order N. `HexMesh_CreateDeviceData` copied them to the GPU with:
+**Map every NodalStorage order to the device**. `NodalStorage(N)` holds the quadrature nodes, weights and derivative matrices for polynomial order N. `HexMesh_CreateDeviceData` copied them to the GPU with:
 
 ```fortran
 DO i = 0, self % Nx(1) !it should be the maximum nX
@@ -22,13 +20,13 @@ That is the x-order of *element 1*. The comment already says it should be the ma
 
 Caveat: on its own, this doesn't make anisotropic orders work on the GPU. The laptop GPU run found a second, separate crash in `HexMesh_ProlongSolToFaces`. It also found that the CPU build of the GPU code gives NaN on p-nonconforming faces, because `Face_AdaptSolToFace` lost the interpolation that legacy has. Those are tracked separately. This commit only removes one of the obstacles.
 
-**Balance enter/exit data in HexMesh** (`b5ebff3b`). A device-allocation trace on the laptop GPU found about 7,200 allocations still alive at exit. Going through `CreateDeviceData` and `ExitDeviceData` side by side:
+**Balance enter/exit data in HexMesh**. A device-allocation trace on the laptop GPU found about 7,200 allocations still alive at exit. Going through `CreateDeviceData` and `ExitDeviceData` side by side:
 - `elements % geom % x` was copied in twice;
 - `S_NS`, `stats`, `geom % x`, `geom % normal`, `isInsideBody`, `STL`, the faces' `rho`, `geom % x`, `geom % h`, the zones and `no_of_elements` were copied in but never deleted.
 
 The duplicate copy-in is removed and the missing deletes are added, so every `enter data` now has a matching `exit data`. At program exit this is harmless, because the CUDA context frees everything anyway. It matters for leak checkers, and for anything that re-creates a mesh on the device inside one run.
 
-**Release `sem` at shut-down** (`9da7daa6`). Both mains do `!$acc enter data copyin(sem)` and never delete it, and the multiphase main never called `ExitDeviceData` at all. The NS main gets the missing delete. The multiphase main gets the same teardown block the NS main already has.
+**Release `sem` at shut-down**. Both mains do `!$acc enter data copyin(sem)` and never delete it, and the multiphase main never called `ExitDeviceData` at all. The NS main gets the missing delete. The multiphase main gets the same teardown block the NS main already has.
 
 ### 2. `Face_Assign` aliased instead of copying (1 commit)
 
@@ -45,17 +43,17 @@ So `copy = original` didn't copy anything: both faces pointed to the same geomet
 
 These three only matter with `ENABLE_THREADS=YES`. nvfortran builds force threads off, so the GPU binaries are unaffected.
 
-- **Actuator-line point search** (`25447e75`). An `!$omp do` was closed about 80 lines after the end of its loop. It also listed `Q` and `Qtemp` as private, but those variables no longer exist, so `ENABLE_THREADS=YES` didn't compile at all. The construct is now closed right after the loop, with the right private list.
-- **Monitor integrals** (`5aa1d97b`). In the surface-force and vector volume-integral loops, scratch variables (`p`, `tau`, `val`, `local1..local5`) were shared between threads. Every thread wrote to the same variables at the same time. They are now private. There are six such loops. The stack fixed two of them (total force and the source integral). This commit also fixes the other four (pressure force, viscous force, velocity and momentum), which had the same race.
-- **Boundary-face loops** (`448cfb1b`). `computeBoundaryFlux` is called by every thread inside the parallel region of `ComputeTimeDerivative`. Its face loops had no `!$omp do`, so every thread computed every boundary face. That is the same work repeated *n* times, with all threads writing to the same faces. The loops are now shared out with `!$omp do`, as legacy horses3d does. The per-zone `FlowNeumann` call loops over the zone itself, so it runs under `!$omp single`. (The stack put the whole routine under `!$omp single`. That's correct, but it makes the boundary serial.)
+- **Actuator-line point search**. An `!$omp do` was closed about 80 lines after the end of its loop. It also listed `Q` and `Qtemp` as private, but those variables no longer exist, so `ENABLE_THREADS=YES` didn't compile at all. The construct is now closed right after the loop, with the right private list.
+- **Monitor integrals**. In the surface-force and vector volume-integral loops, scratch variables (`p`, `tau`, `val`, `local1..local5`) were shared between threads. Every thread wrote to the same variables at the same time. They are now private. There are six such loops. The stack fixed two of them (total force and the source integral). This commit also fixes the other four (pressure force, viscous force, velocity and momentum), which had the same race.
+- **Boundary-face loops**. `computeBoundaryFlux` is called by every thread inside the parallel region of `ComputeTimeDerivative`. Its face loops had no `!$omp do`, so every thread computed every boundary face. That is the same work repeated *n* times, with all threads writing to the same faces. The loops are now shared out with `!$omp do`, as legacy horses3d does. The per-zone `FlowNeumann` call loops over the zone itself, so it runs under `!$omp single`. (The stack put the whole routine under `!$omp single`. That's correct, but it makes the boundary serial.)
 
 ### 4. Actuator line: unallocated array (1 commit)
 
-`newPointToFind` is only allocated in MPI runs, but it was set to zero on every call (`c315bd79`). In a serial run that's an assignment to an unallocated array. It's now guarded with `if (allocated(...))`.
+`newPointToFind` is only allocated in MPI runs, but it was set to zero on every call. In a serial run that's an assignment to an unallocated array. It's now guarded with `if (allocated(...))`.
 
 ### 5. Multiphase "source" volume monitor (1 commit)
 
-Legacy horses3d's multiphase solver accepts a `source` volume monitor, but the GPU port lost it (`6a03d76b`). As a result, the multiphase `ActuatorLineInterpolation` control file, which is identical to legacy's, is rejected at start-up. The integral it needs (`SOURCE`) is already compiled for multiphase; this commit wires it back into the monitor, as legacy does.
+Legacy horses3d's multiphase solver accepts a `source` volume monitor, but the GPU port lost it. As a result, the multiphase `ActuatorLineInterpolation` control file, which is identical to legacy's, is rejected at start-up. The integral it needs (`SOURCE`) is already compiled for multiphase; this commit wires it back into the monitor, as legacy does.
 
 ---
 
@@ -68,6 +66,6 @@ Legacy horses3d's multiphase solver accepts a `source` volume monitor, but the G
 
 The threaded build, and Cylinder with 4 threads, were checked on the earlier combined branch with the same OpenMP commits.
 
-**GPU (RTX 3060 laptop, nvfortran 26.3).** These commits were run earlier on the previous `develop` (`ca6f0bd2`), together with the strong-form change. All 17 single-GPU CI cases gave output bitwise identical to `develop`, at the same speed within noise. The two device-data commits were written after that run and have not been run on a GPU yet. They are on the list for the next laptop run, together with a leak check.
+**GPU (RTX 3060 laptop, nvfortran 26.3).** These commits were run earlier on the previous `develop`, together with the strong-form change. All 17 single-GPU CI cases gave output bitwise identical to `develop`, at the same speed within noise. The two device-data commits were written after that run and have not been run on a GPU yet.
 
 **Not checked:** multi-GPU. The cluster CI (`CI_parallel_GPU.yml`) should be run on this branch before merging.

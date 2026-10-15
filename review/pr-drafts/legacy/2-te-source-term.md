@@ -1,6 +1,6 @@
 ## Truncation-error sensor: call the source term with the right point and a clean S
 
-This PR changes two lines in the truncation-error shock sensor. No existing test changes, because no test uses this sensor. It's one of four small, independent PRs that came out of reviewing the GPU version of HORSES3D.
+This PR changes two lines in the truncation-error shock sensor. No existing test changes, because no test uses this sensor. It's one of five small, independent PRs that came out of reviewing the GPU version of HORSES3D.
 
 ### What this code does
 

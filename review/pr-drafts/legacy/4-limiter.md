@@ -1,6 +1,6 @@
 ## Positivity limiter: measure pressure against the pressure of the average state
 
-This PR changes one line in the positivity limiter. It changes results, so it's here to be discussed rather than merged as a plain bug fix. It's one of four small, independent PRs that came out of reviewing the GPU version of HORSES3D.
+This PR changes one line in the positivity limiter. It changes results, so it's here to be discussed rather than merged as a plain bug fix. It's one of five small, independent PRs that came out of reviewing the GPU version of HORSES3D.
 
 ### How the limiter works today
 

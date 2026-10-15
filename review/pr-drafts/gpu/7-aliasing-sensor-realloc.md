@@ -1,7 +1,5 @@
 ## Aliasing sensor: don't free the scratch arrays when the next element has the same order
 
-**Base:** `develop` · **Branch:** `fix/aliasing-sensor-realloc` · 1 commit, 1 line · same bug as legacy
-
 This is the GPU twin of the legacy PR of the same name, which explains it step by step. In short, `Sensor_aliasing` keeps its scratch arrays (`F`, `Fs`, `Gs`, `Hs`, `aliasing`) from one element to the next and is meant to reallocate them only when the polynomial order changes. When the order *doesn't* change, it set `need_alloc = .false.` but left `need_dealloc = .true.`. So it freed the arrays and never allocated them again. The next call, `ComputeInnerFluxes(e, EulerFlux, F)`, then got an unallocated `F` and segfaulted.
 
 The fix adds one line:

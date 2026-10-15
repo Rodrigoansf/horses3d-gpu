@@ -1,6 +1,6 @@
 ## SVV with energy gradient variables: fix the velocity divergence
 
-This PR fixes one index in the SVV dissipation flux. The fix itself is clear. But it changes the results of `TaylorGreenSVVLES`, so that test's reference values have to be updated too, and that part deserves a second pair of eyes. It's one of four small, independent PRs that came out of reviewing the GPU version of HORSES3D.
+This PR fixes one index in the SVV dissipation flux. The fix itself is clear. But it changes the results of `TaylorGreenSVVLES`, so that test's reference values have to be updated too, and that part deserves a second pair of eyes. It's one of five small, independent PRs that came out of reviewing the GPU version of HORSES3D.
 
 ### Where this code is
 

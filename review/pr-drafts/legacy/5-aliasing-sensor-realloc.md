@@ -1,6 +1,6 @@
 ## Aliasing sensor: don't free the scratch arrays when the next element has the same order
 
-This PR adds one line to the aliasing shock sensor. It fixes a crash and changes nothing else. It came out of reviewing the GPU version of HORSES3D, which has the same code.
+This PR adds one line to the aliasing shock sensor. It fixes a crash and changes nothing else. It's one of five small, independent PRs that came out of reviewing the GPU version of HORSES3D, which has the same code.
 
 ### What this code does
 

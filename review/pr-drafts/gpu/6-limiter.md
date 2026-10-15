@@ -1,7 +1,5 @@
 ## Positivity limiter: measure pressure against the pressure of the average state
 
-**Base:** `develop` · **Branch:** `change/limiter-pressure-reference` · 1 commit · same change as legacy
-
 This is the GPU twin of the legacy PR of the same name. **It changes results, so it should be decided together with the legacy one.** The legacy PR explains the reasoning slowly. Here is the short version.
 
 In pass 2 of `stage_limiter`, the pressure correction is
@@ -39,4 +37,4 @@ The differences are 2e-6 to 2e-4 relative. Legacy horses3d reproduces both rows 
 ### How it was checked
 
 - CPU (gfortran 13, serial): `LimiterTest` 8/8 with the new references.
-- GPU: not yet run with this change. It's on the list for the next laptop run.
+- GPU: not yet run with this change.

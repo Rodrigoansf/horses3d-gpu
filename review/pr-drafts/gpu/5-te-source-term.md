@@ -1,7 +1,5 @@
 ## Truncation-error sensor: call the source term with the right point and a clean S
 
-**Base:** `GMM_develop` · **Branch:** `change/te-sensor-source-term` · 1 commit, 2 lines · same bug as legacy
-
 This is the GPU twin of the legacy PR of the same name, which has the full explanation and the evidence. In short, `Sensor_truncation` calls the user source term at every node of the coarse element like this:
 
 ```fortran

@@ -1,7 +1,5 @@
 ## SVV with energy gradient variables: fix the velocity divergence
 
-**Base:** `GMM_develop` · **Branch:** `change/svv-energy-divv` · 2 commits · same bug as legacy
-
 This is the GPU twin of the legacy PR of the same name, which has the full explanation. In short:
 
 `SVV_physical_dissipation_ENERGY` (`SVV.f90`) computes
@@ -20,7 +18,7 @@ The rest of the routine already uses those indices. The line was copied from `Vi
 
 ### Commits
 
-1. The one-line fix (zalbanob, from #116).
+1. The one-line fix (zalbanob, from horses-framework/horses3d-gpu#116).
 2. The new residual references for `TaylorGreenSVVLES`, the only test that uses SVV with energy gradient variables. They are **the same values as in the legacy PR**, so the two codes keep sharing one reference.
 
 ### How it was checked (CPU, gfortran 13, serial)
