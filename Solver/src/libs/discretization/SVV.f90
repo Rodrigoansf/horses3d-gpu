@@ -17,6 +17,9 @@ module SpectralVanishingViscosity
 
    private
    public   SVV, InitializeSVV
+   public   SVVdev_filter, SVVdev_kind, SVVdev_lowPass, SVVdev_W, SVVdev_mu, SVVdev_diss
+   public   SVV_PHYS_ENERGY, SVV_PHYS_ENTROPY, SVV_GP_ENTROPY
+   public   SVV_Hflux_0D, SVV_Flux_0D
 
    integer,          parameter  :: Nmax = 20
 !
@@ -73,6 +76,47 @@ module SpectralVanishingViscosity
    end type SVV_t
 
    type(SVV_t), protected :: SVV
+!
+!  =====================================================================
+!  SCDEV_DISPATCH (SVV) -- what the device SVV kernel reads
+!  =====================================================================
+!
+!  SVV_t holds procedure pointers and one allocatable filter matrix per
+!  polynomial order; neither can be used in an OpenACC compute region. So,
+!  as for the other shock-capturing methods (see SCDEV_DISPATCH in
+!  ShockCapturing.f90), InitializeSVV and SVV_UpdateFilters copy them into
+!  the plain module data below and push it to the device:
+!
+!     SVVdev_kind   replaces Compute_Hflux / Compute_SVV (select case in
+!                   SVV_Hflux_0D / SVV_Flux_0D).
+!     SVVdev_lowPass filterType == LPASS_FILTER.
+!     SVVdev_filter filters(N) % Q(i,l) is SVVdev_filter(i,l,N), for every
+!                   constructed N.
+!     SVVdev_W      per-element scratch for the three 1D filter passes, the
+!                   size of AviscContravariantFlux. Only allocated when SVV
+!                   is used.
+!     SVVdev_mu     sqrt(mu) and sqrt(alpha) at every node, kept from the
+!                   first pass to the last so they are computed once.
+!     SVVdev_diss   per-element SVV dissipation, contiguous so the monitors
+!                   can get it back in one transfer (see
+!                   SC_UpdateHostArtificialDiss in ShockCapturing.f90).
+!
+!  The kernel itself, SC_ComputeElementSVVFlux, is in ShockCapturing.f90,
+!  next to the viscosity parameters it needs.
+!  =====================================================================
+!
+   integer, parameter :: SVV_PHYS_ENERGY  = 1   !< Physical dissipation, energy gradient variables
+   integer, parameter :: SVV_PHYS_ENTROPY = 2   !< Physical dissipation, entropy gradient variables
+   integer, parameter :: SVV_GP_ENTROPY   = 3   !< Guermond-Popov dissipation, entropy gradient variables
+
+   integer,  protected :: SVVdev_kind    = SVV_PHYS_ENERGY
+   logical,  protected :: SVVdev_lowPass = .false.
+   real(RP), protected :: SVVdev_filter(0:Nmax, 0:Nmax, 0:Nmax) = 0.0_RP
+   real(RP), allocatable :: SVVdev_W(:,:,:,:,:,:)   !< (1:NCONS, 0:Nx, 0:Ny, 0:Nz, 1:NDIM, eID)
+   real(RP), allocatable :: SVVdev_mu(:,:,:,:,:)    !< (1:2, 0:Nx, 0:Ny, 0:Nz, eID): sqrt(mu), sqrt(alpha)
+   real(RP), allocatable :: SVVdev_diss(:)          !< (eID)
+
+   !$acc declare create(SVVdev_kind, SVVdev_lowPass, SVVdev_filter, SVVdev_W, SVVdev_mu, SVVdev_diss)
 
    abstract interface
       subroutine Compute_SVV_f(NCONS, NGRAD, Q, Hx, Hy, Hz, sqrt_mu, sqrt_alpha, F)
@@ -235,6 +279,39 @@ module SpectralVanishingViscosity
                error stop
             end select
          end select
+!
+!        ------------------------------------------------------------
+!        Flatten for the device (see SCDEV_DISPATCH (SVV) at the top)
+!        ------------------------------------------------------------
+!
+         select case (self % diss_type)
+         case (GUERMOND_DISS)
+            SVVdev_kind = SVV_GP_ENTROPY
+         case default
+            if (grad_vars == GRADVARS_ENTROPY) then
+               SVVdev_kind = SVV_PHYS_ENTROPY
+            else
+               SVVdev_kind = SVV_PHYS_ENERGY
+            end if
+         end select
+
+         SVVdev_lowPass = (self % filterType == LPASS_FILTER)
+         !$acc update device(SVVdev_kind, SVVdev_lowPass)
+!
+!        Scratch sized for the orders at start-up. The filters are also only
+!        built here (and for the TE sensor's coarse mesh), so neither path
+!        follows a change of order during the run.
+!
+         safedeallocate(SVVdev_W)
+         safedeallocate(SVVdev_mu)
+         safedeallocate(SVVdev_diss)
+         allocate(SVVdev_W(1:NCONS, 0:maxval(mesh % Nx), 0:maxval(mesh % Ny), 0:maxval(mesh % Nz), &
+                           1:NDIM, 1:size(mesh % elements)))
+         allocate(SVVdev_mu(1:2, 0:maxval(mesh % Nx), 0:maxval(mesh % Ny), 0:maxval(mesh % Nz), &
+                            1:size(mesh % elements)))
+         allocate(SVVdev_diss(1:size(mesh % elements)))
+         SVVdev_diss = 0.0_RP
+         !$acc update device(SVVdev_diss)
 
       end subroutine InitializeSVV
 !
@@ -283,7 +360,7 @@ module SpectralVanishingViscosity
 !        Local variables
 !        ---------------
 !
-         integer :: eID
+         integer :: eID, N
 
 
          do eID = 1, mesh % no_of_elements
@@ -291,6 +368,13 @@ module SpectralVanishingViscosity
             call self % ConstructFilter(mesh % Ny(eID))
             call self % ConstructFilter(mesh % Nz(eID))
          end do
+!
+!        Device copy of every constructed filter
+!        ---------------------------------------
+         do N = 0, Nmax
+            if ( self % filters(N) % constructed ) SVVdev_filter(0:N, 0:N, N) = self % filters(N) % Q
+         end do
+         !$acc update device(SVVdev_filter)
 
       end subroutine SVV_UpdateFilters
 !
@@ -437,6 +521,7 @@ module SpectralVanishingViscosity
 !//////////////////////////////////////////////////////////////////////////////////////////////////////////////
 !
       subroutine Hflux_physical_dissipation_ENERGY(NCONS, NGRAD, Q, Ux, Uy, Uz, sqrt_mu, sqrt_alpha, Hx, Hy, Hz)
+         !$acc routine seq
 !
 !        ***************************************************************************************
 !           For the energy variables, the SVV flux is very simple as the NS viscous matrix
@@ -463,6 +548,7 @@ module SpectralVanishingViscosity
       end subroutine Hflux_physical_dissipation_ENERGY
 
       subroutine Hflux_physical_dissipation_ENTROPY(NCONS, NGRAD, Q, Ux, Uy, Uz, sqrt_mu, sqrt_alpha, Hx, Hy, Hz)
+         !$acc routine seq
 !
 !        ***************************************************************************************
 !
@@ -538,8 +624,18 @@ module SpectralVanishingViscosity
          Hz(IRHOW) = 0.0_RP
          Hz(IRHOE) = Uz(IRHOE)
 
-         Hx = Hx*[sqrt_alpha, 4.0_RP/3.0_RP*sqrt_mu_T, sqrt_mu_T, sqrt_mu_T, sqrt_mu*mu_to_kappa_gammaM2*p_div_rho]
-         Hy = Hy*[sqrt_alpha, 0.0_RP                 , sqrt_mu_T, sqrt_mu_T, sqrt_mu*mu_to_kappa_gammaM2*p_div_rho]
+!        Scale with sqrt(D), written out (no array constructors in device code)
+         Hx(IRHO)  = Hx(IRHO)  * sqrt_alpha
+         Hx(IRHOU) = Hx(IRHOU) * (4.0_RP/3.0_RP*sqrt_mu_T)
+         Hx(IRHOV) = Hx(IRHOV) * sqrt_mu_T
+         Hx(IRHOW) = Hx(IRHOW) * sqrt_mu_T
+         Hx(IRHOE) = Hx(IRHOE) * (sqrt_mu*mu_to_kappa_gammaM2*p_div_rho)
+
+         Hy(IRHO)  = Hy(IRHO)  * sqrt_alpha
+         Hy(IRHOU) = Hy(IRHOU) * 0.0_RP
+         Hy(IRHOV) = Hy(IRHOV) * sqrt_mu_T
+         Hy(IRHOW) = Hy(IRHOW) * sqrt_mu_T
+         Hy(IRHOE) = Hy(IRHOE) * (sqrt_mu*mu_to_kappa_gammaM2*p_div_rho)
 
          Hz(IRHO)  = Hz(IRHO)*sqrt_alpha
          Hz(IRHOE) = Hz(IRHOE)*sqrt_mu*mu_to_kappa_gammaM2*p_div_rho
@@ -547,6 +643,7 @@ module SpectralVanishingViscosity
       end subroutine Hflux_physical_dissipation_ENTROPY
 
       subroutine Hflux_GuermondPopov_ENTROPY(NCONS, NGRAD, Q, Ux, Uy, Uz, sqrt_mu, sqrt_alpha, Hx, Hy, Hz)
+         !$acc routine seq
 !
 !        ***************************************************************************************
 !
@@ -609,19 +706,19 @@ module SpectralVanishingViscosity
          sqrt_alpha_rho = sqrt_alpha*sqrt(Q(IRHO))
          sqrt_mu_p      = sqrt_mu*sqrt(p_div_rho*Q(IRHO))
 
-         Hx(IRHO)  = invRho*sum(Q*Ux)
+         Hx(IRHO)  = invRho*(Q(1)*Ux(1) + Q(2)*Ux(2) + Q(3)*Ux(3) + Q(4)*Ux(4) + Q(5)*Ux(5))
          Hx(IRHOU) = Ux(IRHOU) + u*Ux(IRHOE)
          Hx(IRHOV) = Ux(IRHOV) + v*Ux(IRHOE) + Uy(IRHOU) + u*Uy(IRHOE)
          Hx(IRHOW) = Ux(IRHOW) + w*Ux(IRHOE) + Uz(IRHOU) + u*Uz(IRHOE)
          Hx(IRHOE) = lambda*Ux(IRHOE)
 
-         Hy(IRHO)  = invRho*sum(Q*Uy)
+         Hy(IRHO)  = invRho*(Q(1)*Uy(1) + Q(2)*Uy(2) + Q(3)*Uy(3) + Q(4)*Uy(4) + Q(5)*Uy(5))
          Hy(IRHOU) = 0.0_RP
          Hy(IRHOV) = Uy(IRHOV) + v*Uy(IRHOE)
          Hy(IRHOW) = Uy(IRHOW) + w*Uy(IRHOE) + Uz(IRHOV) + v*Uz(IRHOE)
          Hy(IRHOE) = lambda*Uy(IRHOE)
 
-         Hz(IRHO)  = invRho*sum(Q*Uz)
+         Hz(IRHO)  = invRho*(Q(1)*Uz(1) + Q(2)*Uz(2) + Q(3)*Uz(3) + Q(4)*Uz(4) + Q(5)*Uz(5))
          Hz(IRHOU) = 0.0_RP
          Hz(IRHOV) = 0.0_RP
          Hz(IRHOW) = Uz(IRHOW) + w*Uz(IRHOE)
@@ -629,9 +726,23 @@ module SpectralVanishingViscosity
 !
 !        Scale with sqrt(D)
 !        ------------------
-         Hx = Hx*[sqrt_alpha_rho, sqrt_mu_p, 0.5_RP*sqrt_mu_p, 0.5_RP*sqrt_mu_p, sqrt_alpha_rho]
-         Hy = Hy*[sqrt_alpha_rho, 0.0_RP   , sqrt_mu_p       , 0.5_RP*sqrt_mu_p, sqrt_alpha_rho]
-         Hz = Hz*[sqrt_alpha_rho, 0.0_RP   , 0.0_RP          , sqrt_mu_p       , sqrt_alpha_rho]
+         Hx(IRHO)  = Hx(IRHO)  * sqrt_alpha_rho
+         Hx(IRHOU) = Hx(IRHOU) * sqrt_mu_p
+         Hx(IRHOV) = Hx(IRHOV) * (0.5_RP*sqrt_mu_p)
+         Hx(IRHOW) = Hx(IRHOW) * (0.5_RP*sqrt_mu_p)
+         Hx(IRHOE) = Hx(IRHOE) * sqrt_alpha_rho
+
+         Hy(IRHO)  = Hy(IRHO)  * sqrt_alpha_rho
+         Hy(IRHOU) = Hy(IRHOU) * 0.0_RP
+         Hy(IRHOV) = Hy(IRHOV) * sqrt_mu_p
+         Hy(IRHOW) = Hy(IRHOW) * (0.5_RP*sqrt_mu_p)
+         Hy(IRHOE) = Hy(IRHOE) * sqrt_alpha_rho
+
+         Hz(IRHO)  = Hz(IRHO)  * sqrt_alpha_rho
+         Hz(IRHOU) = Hz(IRHOU) * 0.0_RP
+         Hz(IRHOV) = Hz(IRHOV) * 0.0_RP
+         Hz(IRHOW) = Hz(IRHOW) * sqrt_mu_p
+         Hz(IRHOE) = Hz(IRHOE) * sqrt_alpha_rho
 
       end subroutine Hflux_GuermondPopov_ENTROPY
 
@@ -643,6 +754,7 @@ module SpectralVanishingViscosity
 !//////////////////////////////////////////////////////////////////////////////////////////////////////////////
 !
       subroutine SVV_physical_dissipation_ENERGY(NCONS, NGRAD, Q, Hx, Hy, Hz, sqrt_mu, sqrt_alpha, F)
+         !$acc routine seq
          implicit none
          integer, intent(in)        :: NCONS, NGRAD
          real(kind=RP), intent(in)  :: Q(NCONS)
@@ -688,6 +800,7 @@ module SpectralVanishingViscosity
       end subroutine SVV_physical_dissipation_ENERGY
 
       subroutine SVV_physical_dissipation_ENTROPY(NCONS, NGRAD, Q, Hx, Hy, Hz, sqrt_mu, sqrt_alpha, F)
+         !$acc routine seq
 !
 !        ***************************************************************************************
 !
@@ -748,8 +861,17 @@ module SpectralVanishingViscosity
          p_div_rho = thermodynamics % gammaMinus1*(invRho * Q(IRHOE)-0.5_RP*(u*u+v*v+w*w))
          sqrt_mu_T = sqrt_mu*sqrt(p_div_rho)
 
-         Hx_sqrtD = Hx*[sqrt_alpha, sqrt_mu_T, sqrt_mu_T, sqrt_mu_T, sqrt_mu*p_div_rho]
-         Hy_sqrtD = Hy*[sqrt_alpha, 0.0_RP   , sqrt_mu_T, sqrt_mu_T, sqrt_mu*p_div_rho]
+         Hx_sqrtD(IRHO)  = Hx(IRHO)  * sqrt_alpha
+         Hx_sqrtD(IRHOU) = Hx(IRHOU) * sqrt_mu_T
+         Hx_sqrtD(IRHOV) = Hx(IRHOV) * sqrt_mu_T
+         Hx_sqrtD(IRHOW) = Hx(IRHOW) * sqrt_mu_T
+         Hx_sqrtD(IRHOE) = Hx(IRHOE) * (sqrt_mu*p_div_rho)
+
+         Hy_sqrtD(IRHO)  = Hy(IRHO)  * sqrt_alpha
+         Hy_sqrtD(IRHOU) = Hy(IRHOU) * 0.0_RP
+         Hy_sqrtD(IRHOV) = Hy(IRHOV) * sqrt_mu_T
+         Hy_sqrtD(IRHOW) = Hy(IRHOW) * sqrt_mu_T
+         Hy_sqrtD(IRHOE) = Hy(IRHOE) * (sqrt_mu*p_div_rho)
 
          Hz_sqrtD(IRHO)        = Hz(IRHO)*sqrt_alpha
          Hz_sqrtD(IRHOU:IRHOW) = 0.0_RP
@@ -776,6 +898,7 @@ module SpectralVanishingViscosity
       end subroutine SVV_physical_dissipation_ENTROPY
 
       subroutine SVV_GuermondPopov_ENTROPY(NCONS, NGRAD, Q, Hx, Hy, Hz, sqrt_mu, sqrt_alpha, F)
+         !$acc routine seq
 !
 !        ***************************************************************************************
 !
@@ -842,9 +965,23 @@ module SpectralVanishingViscosity
          sqrt_alpha_rho = sqrt_alpha*sqrt(Q(IRHO))
          sqrt_mu_p      = sqrt_mu*sqrt(p_div_rho*Q(IRHO))
 
-         Hx_sqrtD = Hx*[sqrt_alpha_rho, sqrt_mu_p, sqrt_mu_p, sqrt_mu_p, sqrt_alpha_rho]
-         Hy_sqrtD = Hy*[sqrt_alpha_rho, 0.0_RP   , sqrt_mu_p, sqrt_mu_p, sqrt_alpha_rho]
-         Hz_sqrtD = Hz*[sqrt_alpha_rho, 0.0_RP   , 0.0_RP   , sqrt_mu_p, sqrt_alpha_rho]
+         Hx_sqrtD(IRHO)  = Hx(IRHO)  * sqrt_alpha_rho
+         Hx_sqrtD(IRHOU) = Hx(IRHOU) * sqrt_mu_p
+         Hx_sqrtD(IRHOV) = Hx(IRHOV) * sqrt_mu_p
+         Hx_sqrtD(IRHOW) = Hx(IRHOW) * sqrt_mu_p
+         Hx_sqrtD(IRHOE) = Hx(IRHOE) * sqrt_alpha_rho
+
+         Hy_sqrtD(IRHO)  = Hy(IRHO)  * sqrt_alpha_rho
+         Hy_sqrtD(IRHOU) = Hy(IRHOU) * 0.0_RP
+         Hy_sqrtD(IRHOV) = Hy(IRHOV) * sqrt_mu_p
+         Hy_sqrtD(IRHOW) = Hy(IRHOW) * sqrt_mu_p
+         Hy_sqrtD(IRHOE) = Hy(IRHOE) * sqrt_alpha_rho
+
+         Hz_sqrtD(IRHO)  = Hz(IRHO)  * sqrt_alpha_rho
+         Hz_sqrtD(IRHOU) = Hz(IRHOU) * 0.0_RP
+         Hz_sqrtD(IRHOV) = Hz(IRHOV) * 0.0_RP
+         Hz_sqrtD(IRHOW) = Hz(IRHOW) * sqrt_mu_p
+         Hz_sqrtD(IRHOE) = Hz(IRHOE) * sqrt_alpha_rho
 
          F(IRHO,IX)  = Hx_sqrtD(IRHO)
          F(IRHOU,IX) = u*Hx_sqrtD(IRHO) + Hx_sqrtD(IRHOU)
@@ -865,6 +1002,50 @@ module SpectralVanishingViscosity
          F(IRHOE,IZ) = e*Hz_sqrtD(IRHO) + u*Hx_sqrtD(IRHOW) + v*Hy_sqrtD(IRHOW) + w*Hz_sqrtD(IRHOW) + lambda*Hz_sqrtD(IRHOE)
 
       end subroutine SVV_GuermondPopov_ENTROPY
+!
+!//////////////////////////////////////////////////////////////////////////////////////////////////////////////
+!
+!        SCDEV_DISPATCH (SVV) -- device-side replacements for the Compute_Hflux and
+!        Compute_SVV procedure pointers: same choice, made with a select case on
+!        SVVdev_kind (set in InitializeSVV).
+!
+!//////////////////////////////////////////////////////////////////////////////////////////////////////////////
+!
+      subroutine SVV_Hflux_0D(Q, Ux, Uy, Uz, sqrt_mu, sqrt_alpha, Hx, Hy, Hz)
+         !$acc routine seq
+         implicit none
+         real(kind=RP), intent(in)  :: Q(NCONS), Ux(NGRAD), Uy(NGRAD), Uz(NGRAD)
+         real(kind=RP), intent(in)  :: sqrt_mu, sqrt_alpha
+         real(kind=RP), intent(out) :: Hx(NCONS), Hy(NCONS), Hz(NCONS)
+
+         select case (SVVdev_kind)
+         case (SVV_PHYS_ENTROPY)
+            call Hflux_physical_dissipation_ENTROPY(NCONS, NGRAD, Q, Ux, Uy, Uz, sqrt_mu, sqrt_alpha, Hx, Hy, Hz)
+         case (SVV_GP_ENTROPY)
+            call Hflux_GuermondPopov_ENTROPY(NCONS, NGRAD, Q, Ux, Uy, Uz, sqrt_mu, sqrt_alpha, Hx, Hy, Hz)
+         case default   ! SVV_PHYS_ENERGY
+            call Hflux_physical_dissipation_ENERGY(NCONS, NGRAD, Q, Ux, Uy, Uz, sqrt_mu, sqrt_alpha, Hx, Hy, Hz)
+         end select
+
+      end subroutine SVV_Hflux_0D
+
+      subroutine SVV_Flux_0D(Q, Hx, Hy, Hz, sqrt_mu, sqrt_alpha, F)
+         !$acc routine seq
+         implicit none
+         real(kind=RP), intent(in)  :: Q(NCONS), Hx(NCONS), Hy(NCONS), Hz(NCONS)
+         real(kind=RP), intent(in)  :: sqrt_mu, sqrt_alpha
+         real(kind=RP), intent(out) :: F(NCONS, NDIM)
+
+         select case (SVVdev_kind)
+         case (SVV_PHYS_ENTROPY)
+            call SVV_physical_dissipation_ENTROPY(NCONS, NGRAD, Q, Hx, Hy, Hz, sqrt_mu, sqrt_alpha, F)
+         case (SVV_GP_ENTROPY)
+            call SVV_GuermondPopov_ENTROPY(NCONS, NGRAD, Q, Hx, Hy, Hz, sqrt_mu, sqrt_alpha, F)
+         case default   ! SVV_PHYS_ENERGY
+            call SVV_physical_dissipation_ENERGY(NCONS, NGRAD, Q, Hx, Hy, Hz, sqrt_mu, sqrt_alpha, F)
+         end select
+
+      end subroutine SVV_Flux_0D
 !
 !//////////////////////////////////////////////////////////////////////////////////////////////////
 !
@@ -954,6 +1135,10 @@ module SpectralVanishingViscosity
                nullify(this % filters(i) % B)
             end if
          end do
+
+         safedeallocate(SVVdev_W)
+         safedeallocate(SVVdev_mu)
+         safedeallocate(SVVdev_diss)
 
       end subroutine SVV_destruct
 
