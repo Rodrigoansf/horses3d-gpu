@@ -1322,10 +1322,14 @@ module SpatialDiscretization
 
             !$acc parallel loop gang present(mesh) async(1)
             do eID = 1, size(mesh % elements)
-               call SC_ComputeElementAviscFlux(mesh % elements(eID))
+               call SC_ComputeElementAviscFlux(mesh % elements(eID), eID)
             end do
             !$acc end parallel loop
             !$acc wait(1)
+!
+!           SVV dissipation for the volume monitors (SVV runs only)
+!           ------------------------------------------------------
+            call SC_UpdateHostArtificialDiss(mesh)
 !
 !           Device -> host, prolong, host -> device (temporary, see above)
 !           --------------------------------------------------------------
@@ -1337,10 +1341,11 @@ module SpatialDiscretization
 
          else
 !
-!           SVV (filtered) shock capturing was never ported: keep using the
-!           original host routine, which computes the flux and prolongs it to
-!           the faces in one go. Host-only -- on GPU this path needs Q and the
-!           gradients pulled back first.
+!           A method with no device kernel (none at present; SVV has one
+!           since SC_ComputeElementSVVFlux): keep using the original host
+!           routine, which computes the flux and prolongs it to the faces in
+!           one go. Host-only -- on GPU this path needs Q and the gradients
+!           pulled back first.
 !           --------------------------------------------------------------
             do eID = 1, size(mesh % elements)
                call ShockCapturingDriver % ComputeViscosity(mesh, mesh % elements(eID), &
