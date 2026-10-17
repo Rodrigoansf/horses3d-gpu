@@ -1,39 +1,34 @@
 # Stack PRs #113–#117: where things stand
 
-## 0. Current branches (13 Oct 2026): one PR per branch, nothing opened yet
+## 0. Current branches (17 Oct 2026)
 
-Everything below section 0 is the 7 Oct state. The branches named there (`fix/gpu-port-*`, `discuss/legacy-shared-bugs`, `stack-pick/*`) are **superseded** by the ones in this table. They are kept only because the laptop's round-2 task file refers to their commits.
+Team decision (15 Oct): the review changes go in split by feature, to `develop` (horses3d-gpu) and `master` (legacy). `GMM_develop` is Rodrigo's research branch: it gets the fixes directly (no PR) and is kept merged up to `develop`. **No PRs in horses-framework yet**: fork PRs only, until everything is reviewed and tested. The 13 Oct table and everything below section 0 are history.
 
-Minor fixes don't change results in anything that runs today. Each "change" branch changes results somewhere, so it is kept alone to be discussed on its own.
+**horses3d-gpu**, fork Rodrigoansf/horses3d-gpu, all on `develop` = upstream `1c077fea`:
 
-**horses3d-gpu** (fork Rodrigoansf/horses3d-gpu):
-
-| Branch | Base | What |
+| Fork PR | Branch | What |
 |---|---|---|
-| `fix/minor-develop` | `develop` | 9 commits: Face_Assign, NodalStorage mapping, enter/exit data balance, `sem` teardown, ActuatorLine guard, 3 OpenMP fixes, multiphase "source" monitor |
-| `fix/minor-GMM` | `GMM_develop` | 5 commits: Face_Assign, NodalStorage mapping, `make mu` build fix, TE sensor `pAdapt_MPI`, sensor OpenMP `shared` lists |
-| `change/strong-form-split-fluxes` | `develop` | split-form sharp fluxes never computed (port commented the call out), in the strong-form volume term and the aliasing sensor |
-| `change/svv-energy-divv` | `GMM_develop` | SVV `divV` index + TaylorGreenSVVLES references (same values as legacy) |
-| `change/te-sensor-source-term` | `GMM_develop` | TE sensor source term: right point, `S = 0` |
-| `change/limiter-pressure-reference` | `develop` | limiter uses p(q_avg); LimiterTest references updated (legacy reproduces both old and new) |
-| `fix/aliasing-sensor-realloc` | `develop` | aliasing sensor freed its scratch arrays when the next element had the same order (crash on 2nd element; legacy too) |
+| #1 | `fix/minor-develop` | 11 commits: Face_Assign, NodalStorage mapping, enter/exit data balance, `sem` teardown, TE sensor `pAdapt_MPI`, sensor OpenMP `shared` lists, ActuatorLine guard, 3 OpenMP fixes, multiphase "source" monitor |
+| #3 | `change/strong-form-split-fluxes` | split-form sharp fluxes never computed (strong-form volume term, aliasing sensor) |
+| #4 | `change/svv-energy-divv` | SVV `divV` + TaylorGreenSVVLES references (no effect on develop yet: SC isn't applied there) — base moved from GMM_develop to develop |
+| #5 | `change/te-sensor-source-term` | TE sensor source term — base moved from GMM_develop to develop |
+| #6 | `change/limiter-pressure-reference` | limiter uses p(q_avg) |
+| #7 | `fix/aliasing-sensor-realloc` | aliasing sensor scratch-array realloc |
+| new | `fix/paramfile-scalar-dealloc` | ParamfileRegions: avoid the nvfortran 26.3 crash that breaks `Cylinder` on the GPU since horses-framework/horses3d-gpu#119 |
+| #2 | `fix/minor-GMM` | obsolete: its commits are in GMM_develop now; close it |
 
-**legacy horses3d** (fork Rodrigoansf/horses3d, base `master` `e23a7a2`):
+**horses-framework GMM_develop** (pushed directly, fast-forward from `630879e6`): the five `fix/minor-GMM` commits, SVV divV + references, TE source term, **SVV on the GPU** (device port), merge of develop, split-form (2), aliasing realloc, ParamfileRegions. See `pr-drafts/gpu/2-GMM_develop-direct.md`.
 
-| Branch | What |
-|---|---|
-| `legacy/minor-fixes` | TE sensor `pAdapt_MPI` + sensor OpenMP `shared` lists (both crashes, reproduced) |
-| `legacy/te-sensor-source-term` | TE sensor source term |
-| `legacy/svv-energy-divv` | SVV `divV` + TaylorGreenSVVLES references |
-| `legacy/limiter-pressure-reference` | limiter uses p(Qavg) |
-| `legacy/aliasing-sensor-realloc` | aliasing sensor scratch-array realloc (crash on 2nd element) |
+**legacy horses3d**, fork Rodrigoansf/horses3d, all on `upstream-master` = upstream master `a01ca08b4`: `legacy/minor-fixes` (#1), `legacy/te-sensor-source-term` (#2), `legacy/svv-energy-divv` (#3), `legacy/limiter-pressure-reference` (#4), `legacy/aliasing-sensor-realloc` (#5).
 
-`legacy/te-sensor-padapt-mpi` and `legacy/sc-sensor-omp-shared` are superseded by `legacy/minor-fixes`. The proxy refused to delete them; delete by hand.
+Testing (laptop RTX 3060, nvfortran 26.3; gfortran for CPU): see each PR draft. Summary: every develop branch and GMM_develop run the GPU CI cases; anything that should not change results is bitwise identical to its base. Leak check, TE/aliasing scratch cases, CPU/GPU cross-checks and the legacy serial CI (NS + multiphase) are in the drafts.
 
-Note on the limiter: section 2 below says it was dropped. It is back as a *change* branch, to be discussed together with the legacy one. The new references are exactly what legacy produces with the same change.
-
-
-All work is on the fork, Rodrigoansf/horses3d-gpu. Nothing has been pushed to horses-framework.
+New findings, not fixed (beyond the old list in HANDOFF.md):
+- nvfortran 26.3 segfaults when deallocating an allocatable scalar component through an allocatable dummy (fixed for ParamfileRegions only).
+- gfortran wraps any procedure with a procedure-level `USE` of a module that reaches IEEE_ARITHMETIC in an FP-environment save/restore (~100 ns per call). Avoided in the new SVV device routines; `SC_ComputeElementAviscFlux` still has one (per element, negligible).
+- Legacy `NavierStokes/CylinderGMM` is not reproducible run to run (same binary, different residuals between runs; asserts still pass).
+- `ForwardFacingStepSVV` crashes on the GPU on GMM_develop (illegal address in `HexMesh_ComputeLocalGradientNS`).
+- On GMM_develop, `SC_viscosity` (host) and `SC_ComputeElementAviscFlux` (device) disagree on whether the first method acts where sensor >= 1 when there is no second method.
 
 ## 1. Blatant bugs, fixed: no team discussion needed
 

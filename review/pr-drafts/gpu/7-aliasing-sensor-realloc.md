@@ -27,6 +27,6 @@ CPU (gfortran 13, serial), on the same small case as the legacy PR: the TaylorGr
 | this branch alone | runs to the end | 1.0 in every element (reads the uninitialised `Fs/Gs/Hs`) |
 | this branch + the split-form PR | runs to the end | 0.0 in every element, **same as legacy with its fix** |
 
-Not run on a GPU: the sensor runs on the host.
+GPU (RTX 3060 laptop): the sensor itself runs on the host, but the GPU build crashed the same way. On `develop`, `te-alias.control` segfaults before the first step completes. With this branch alone it runs to the end, and the 18 GPU test cases (the CI list plus `TaylorGreenSVVLES`) are bitwise identical to `develop`. Alone, the sensor still reads the never-filled `Fs/Gs/Hs`: that memory happened to give 0.0 on the GPU and 1.0 on the CPU, so the values only mean something together with the split-form PR. With all review PRs stacked, `te-alias.control` runs to the end on the GPU, the sensor is 0.0 in every element as on the CPU and in legacy, and the monitors agree with the CPU build to round-off.
 
-`GMM_develop` has the same code and will get the fix when develop is merged into it.
+`GMM_develop` has the same code and already has this fix (committed there directly, with develop merged in).

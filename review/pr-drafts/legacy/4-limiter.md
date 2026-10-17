@@ -73,6 +73,8 @@ We read this as: the average of the pressures is not the pressure of the average
 - Built with gfortran 13 (`make ns`, serial).
 - `ForwardFacingStep_SSPRK33`: 5/5, bit-identical final solution.
 - The Mach 3 cylinder above, run on master and on this branch.
+- Rebased on master `a01ca08b4`. All 59 Navier–Stokes and multiphase cases of the serial CI workflows were run with gfortran (serial) on master and with all five legacy PRs of this review stacked. 56 are bitwise identical. `TaylorGreenSVVLES` changes, as described in the SVV PR, and passes 8/8 on both sides (old references on master, new ones with the PRs). `CylinderGMM` can't be compared: on master itself, the same binary gives different residuals from one run to the next (its asserts pass every time). `VirtualSurfaces_acoustics_pAdaptationRL` needs HDF5, which the test machine doesn't have.
+
 
 ### Reference
 

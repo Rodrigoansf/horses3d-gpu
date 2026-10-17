@@ -10,7 +10,7 @@ The job: review the zalbanob stack PRs (horses-framework/horses3d-gpu#113 to #11
 
 ## Rules (from the user)
 
-- **Never push to horses-framework.** Work only in the forks, Rodrigoansf/horses3d-gpu and Rodrigoansf/horses3d.
+- **Never push to horses-framework**, except `GMM_develop` (the user's research branch) after testing. Work only in the forks, Rodrigoansf/horses3d-gpu and Rodrigoansf/horses3d, and open no PRs in horses-framework until the user says so.
 - **Run PRs by the user before making them.** Keep each PR small and readable: one branch for minor fixes (fixes that don't change results), and one branch per change that does change results.
 - **Check with the user before going out of scope.** Don't start a new line of work, or fix something you just noticed, without asking: it may be someone else's work. Note it and ask.
 - **Commits are the user's:** author `Rodrigoansf <rodrigoansf@gmail.com>`, with no `Co-Authored-By: Claude` line. PR bodies carry no "Generated with Claude Code" footer.
@@ -30,50 +30,36 @@ git -C horses3d-gpu fetch --all && git -C horses3d fetch --all
 git -C horses3d-gpu checkout claude/eager-lamport-ymhyjk   # review docs live here
 ```
 
-## First task: put the user's name on the commits
+Pushing uses SSH (`git@github.com:Rodrigoansf/...`) with the user's `~/.ssh/Rod` key, set per clone with `git config core.sshCommand "ssh -i ~/.ssh/Rod -o IdentitiesOnly=yes"`. The `upstream` push URL is set to `DISABLED-never-push-to-horses-framework` on purpose.
 
-The cloud session could not do this; its permission system blocked history rewrites. Copy the script out of the repo first, because it rewrites the branch it lives on:
+## Where things stand (17 Oct 2026)
 
-```
-cp horses3d-gpu/review/tools/tie-commits-to-rodrigoansf.sh /tmp/ && bash /tmp/tie-commits-to-rodrigoansf.sh horses3d-gpu horses3d
-```
+Done: the commit-attribution rewrite (15 Oct), the team decision on targets, all branches rebased and tested on the laptop GPU. **Read `review/STATUS.md` section 0 for the branch table.** In short:
 
-It rewrites 13 branches plus this review branch, checks that every tree is unchanged, and force-pushes with lease. The 12 open draft PRs follow their branches automatically. Afterwards, check with `git log --format='%an | %cn | %s' origin/develop..origin/fix/minor-develop` and make sure no `Co-Authored-By` line remains.
+- horses3d-gpu fork PRs to `develop`: #1 minor fixes, #3 split-form, #4 SVV divV, #5 TE source term, #6 limiter, #7 aliasing realloc, plus a new one for `fix/paramfile-scalar-dealloc`. #4 and #5 moved from `GMM_develop` to `develop` (change the base in the PR page). #2 (`fix/minor-GMM`) is obsolete: close it.
+- horses-framework `GMM_develop` was pushed directly (approved by the user; fast-forward): the GMM fixes, the **SVV GPU port**, a merge of `develop`, and the develop fixes the user asked for. Record: `review/pr-drafts/gpu/2-GMM_develop-direct.md`.
+- Legacy fork PRs #1–#5 to `master`, rebased on `a01ca08b4`.
+- PR descriptions: `review/pr-drafts/` (updated with the test results; paste them into the fork PRs).
 
-## Where things stand (15 Oct 2026)
-
-Draft PRs are open **inside the forks only**, so the user can look at the diffs:
-
-| Fork PR | Branch → base | Kind |
-|---|---|---|
-| Rodrigoansf/horses3d#1 | `legacy/minor-fixes` → `upstream-master` | TE sensor MPI + OpenMP crash fixes |
-| Rodrigoansf/horses3d#2 | `legacy/te-sensor-source-term` → `upstream-master` | changes results |
-| Rodrigoansf/horses3d#3 | `legacy/svv-energy-divv` → `upstream-master` | changes results + TaylorGreenSVVLES refs |
-| Rodrigoansf/horses3d#4 | `legacy/limiter-pressure-reference` → `upstream-master` | changes results; to discuss |
-| Rodrigoansf/horses3d#5 | `legacy/aliasing-sensor-realloc` → `upstream-master` | crash fix |
-| Rodrigoansf/horses3d-gpu#1 | `fix/minor-develop` → `develop` | 9 minor fixes |
-| Rodrigoansf/horses3d-gpu#2 | `fix/minor-GMM` → `GMM_develop` | 5 minor fixes (incl. `make mu` build) |
-| Rodrigoansf/horses3d-gpu#3 | `change/strong-form-split-fluxes` → `develop` | sharp fluxes (strong form + aliasing sensor) |
-| Rodrigoansf/horses3d-gpu#4 | `change/svv-energy-divv` → `GMM_develop` | same as legacy #3 |
-| Rodrigoansf/horses3d-gpu#5 | `change/te-sensor-source-term` → `GMM_develop` | same as legacy #2; needs `fix/minor-GMM` to run |
-| Rodrigoansf/horses3d-gpu#6 | `change/limiter-pressure-reference` → `develop` | same as legacy #4 |
-| Rodrigoansf/horses3d-gpu#7 | `fix/aliasing-sensor-realloc` → `develop` | same as legacy #5 |
-
-`upstream-master` in the legacy fork is upstream master `e23a7a2`. The fork's own `master` has the user's three MMS commits and is behind upstream: **leave it alone**. The GPU fork's `develop` and `GMM_develop` equal upstream's `1a173a52` and `630879e6`.
-
-The user is discussing these at the next team meeting; nothing goes to horses-framework until they decide.
+The user's rule now: **no PRs in horses-framework until they have reviewed everything with all tests done.** Pushing to `GMM_develop` (their research branch) is allowed after testing.
 
 ## Open items (ask the user before starting any of them)
 
-- **GPU runs of the new commits (laptop RTX 3060, cc86).** Not yet run on a GPU: the device-data commits in `fix/minor-develop` (balance enter/exit, `sem` teardown; add a leak check), the `make mu` fix in `fix/minor-GMM` (then `Multiphase/EntropyConservingTest` on GMM), and `LimiterTest` on `change/limiter-pressure-reference`.
-- **Superseded branches to delete** (the cloud proxy blocked deletion): `stack-pick/*`, `fix/gpu-port-develop`, `fix/gpu-port-GMM`, `discuss/legacy-shared-bugs`, `review/gpu-results` in the GPU fork; `legacy/te-sensor-padapt-mpi`, `legacy/sc-sensor-omp-shared` in the legacy fork. Do **not** touch the `miguel_*`, `arr/*` and `feature/*` branches: they are mirrored from upstream and are other people's work.
-- **Known, not being fixed here:**
-  - `TaylorGreenSVVLES` on GPU doesn't match the CPU: the SVV branch of `TimeDerivative_ComputeArtificialViscosity` runs on the host without refreshing `Q`/gradients and doesn't push the flux back.
+- Upstream PRs in horses-framework, once the user has reviewed the fork PRs.
+- Multi-GPU / MPI runs on the cluster (`CI_parallel_GPU.yml`), for the develop PRs and `GMM_develop`.
+- Delete the superseded branches (`stack-pick/*`, `fix/gpu-port-develop`, `fix/gpu-port-GMM`, `discuss/legacy-shared-bugs`, `review/gpu-results` in the GPU fork; `legacy/te-sensor-padapt-mpi`, `legacy/sc-sensor-omp-shared` in the legacy fork). Do **not** touch `miguel_*`, `arr/*` and `feature/*`.
+- Known, not being fixed here: see STATUS.md section 0 (new findings) and the list below.
   - Anisotropic orders crash on GPU in `HexMesh_ProlongSolToFaces`.
   - `Face_AdaptSolToFace` lost legacy's p-nonconforming interpolation.
-  - GPU volume monitors are stale.
+  - GPU volume monitors are stale (kinetic-energy rate reads 0 on the GPU).
   - `TruncationErrorClass` has `private(S)` with `S` zeroed outside the OpenMP loop.
-  - TaylorGreenSVVLES's kinetic-energy asserts have tolerances larger than the values they check.
+  - TaylorGreenSVVLES's volume-monitor asserts have tolerances larger than the values they check (the SVV-dissipation reference is 7.8e-8; CPU and GPU both give 2.6e-8).
+  - `ForwardFacingStepSVV` crashes on the GPU on `GMM_develop`.
+  - Artificial-viscosity face prolongation on `GMM_develop` is still a host round trip (`SC_ProlongAviscFluxToFaces`).
+
+## Laptop limits (important)
+
+15 GiB RAM: parallel builds and test runs OOM-killed the Claude app three times. Run heavy jobs one at a time, or with `gpu-wt/tools/sched.py` (memory-aware, one GPU run at a time, each job capped with `systemd-run --user --scope -p MemoryMax=...`). The GPU throttles to ~210 MHz above ~90 °C, so only interleaved timings are comparable. Local test workspace: `~/Desktop/Horses3d-Epicure/gpu-wt` (`NOTES.md`, `tools/`, `results/`).
 
 ## Build and test notes
 

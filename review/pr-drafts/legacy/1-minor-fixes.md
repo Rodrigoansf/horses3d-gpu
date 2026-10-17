@@ -95,3 +95,4 @@ The same truncation-error loop also calls the user source term with the wrong po
 
 - Built serial, MPI and threaded with gfortran 13.
 - The three runs in the table above.
+- Rebased on master `a01ca08b4`. All 59 Navier–Stokes and multiphase cases of the serial CI workflows were run with gfortran (serial) on master and with all five legacy PRs of this review stacked. 56 are bitwise identical. `TaylorGreenSVVLES` changes, as described in the SVV PR, and passes 8/8 on both sides (old references on master, new ones with the PRs). `CylinderGMM` can't be compared: on master itself, the same binary gives different residuals from one run to the next (its asserts pass every time). `VirtualSurfaces_acoustics_pAdaptationRL` needs HDF5, which the test machine doesn't have.

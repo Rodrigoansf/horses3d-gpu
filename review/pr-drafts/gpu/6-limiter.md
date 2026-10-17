@@ -37,4 +37,4 @@ The differences are 2e-6 to 2e-4 relative. Legacy horses3d reproduces both rows 
 ### How it was checked
 
 - CPU (gfortran 13, serial): `LimiterTest` 8/8 with the new references.
-- GPU: not yet run with this change.
+- GPU (RTX 3060 laptop, nvfortran 26.3), this branch against `develop`: `LimiterTest` 8/8, and its residuals at iteration 100 are the CPU values in the table above to all 11 printed digits (both the old row on `develop` and the new row here; the new x-momentum differs by one unit in the last digit: 20.019174813 on the GPU). All other cases of the GPU CI list, plus `TaylorGreenSVVLES`, are bitwise identical to `develop`, so the change only acts where the pressure branch of the limiter activates.

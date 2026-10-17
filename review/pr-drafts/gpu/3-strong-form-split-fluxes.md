@@ -35,10 +35,11 @@ So this changes results only where the old results were built on uninitialised m
 ### How it was checked
 
 - CPU (gfortran 13): builds; `NavierStokes/Cylinder` 9/9.
-- GPU (laptop, earlier run of the first commit together with the minor fixes): 17 single-GPU CI cases bitwise identical to `develop`.
+- GPU (RTX 3060 laptop), this branch against `develop`: the 18 cases (the GPU CI list plus `TaylorGreenSVVLES`) are bitwise identical, as expected since no test uses either path. On its own the branch can't run the TE or aliasing scratch cases: the TE sensor needs the minor-fixes PR (`Face_Assign`), and the aliasing sensor needs the realloc PR.
+- GPU, with all review PRs stacked: the small TE and aliasing cases in `review/scratch-cases` (`te.control`, `te-alias.control`) run to the end and agree with the CPU build to round-off; the aliasing sensor is 0.0 in every element at steps 1–3, as in legacy.
 - No test uses either path.
 - The aliasing sensor still can't run, in this code or in legacy master. It segfaults on the second element, before it reaches the line fixed here. Its scratch-array allocation logic deallocates `F, Fs, Gs, Hs` when the next element has the same order and never reallocates them. That is a separate bug, shared with legacy, fixed in its own PR ("aliasing sensor: don't free the scratch arrays..."). With both PRs, the sensor gives the same values as legacy on a small case.
 
 ### Notes
 
-`GMM_develop` has the same two commented-out lines. It will get the fix when develop is merged into it.
+`GMM_develop` has the same code and already has this fix (committed there directly, with develop merged in). It matters there: without it, the truncation-error sensor of `review/scratch-cases/te.control` (split form, isolated derivative) flags every element on the GPU and none on the CPU, because the GPU reads uninitialised `fSharp/gSharp/hSharp`.
