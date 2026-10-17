@@ -26,7 +26,7 @@ Testing (laptop RTX 3060, nvfortran 26.3; gfortran for CPU): see each PR draft. 
 New findings, not fixed (beyond the old list in HANDOFF.md):
 - nvfortran 26.3 segfaults when deallocating an allocatable scalar component through an allocatable dummy (fixed for ParamfileRegions only).
 - gfortran wraps any procedure with a procedure-level `USE` of a module that reaches IEEE_ARITHMETIC in an FP-environment save/restore (~100 ns per call). Avoided in the new SVV device routines; `SC_ComputeElementAviscFlux` still has one (per element, negligible).
-- Legacy `NavierStokes/CylinderGMM` is not reproducible run to run (same binary, different residuals between runs; asserts still pass).
+- Legacy `NavierStokes/CylinderGMM` is not reproducible run to run: one of three runs of the PR build differed, the other two matched master (master gave three identical runs); asserts always pass.
 - `ForwardFacingStepSVV` crashes on the GPU on GMM_develop (illegal address in `HexMesh_ComputeLocalGradientNS`).
 - On GMM_develop, `SC_viscosity` (host) and `SC_ComputeElementAviscFlux` (device) disagree on whether the first method acts where sensor >= 1 when there is no second method.
 

@@ -62,7 +62,7 @@ else
 end if
 ```
 
-The end state is the same as before in every case: allocated with the value when the key is present, not allocated when it is missing, deallocated when it was allocated on entry and the key is missing. Only the allocate-then-deallocate round trip is gone. Same change in the three readers (integer, real, logical); the character reader doesn't allocate.
+The end state is the same as before: allocated with the value when the key is present, not allocated when it is missing, deallocated when it was allocated on entry and the key is missing. Only the allocate-then-deallocate round trip is gone. One difference in an error case: when the key is present but its value doesn't parse, both versions leave `var` allocated with an undefined value, but the new one also overwrites a value that was already there. Same change in the three readers (integer, real, logical); the character reader doesn't allocate.
 
 This doesn't change any result, so it could also go with the minor fixes; it is separate because it is a new finding, not part of the stack review.
 

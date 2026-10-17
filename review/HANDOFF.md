@@ -47,7 +47,7 @@ The user's rule now: **no PRs in horses-framework until they have reviewed every
 
 - Upstream PRs in horses-framework, once the user has reviewed the fork PRs.
 - Multi-GPU / MPI runs on the cluster (`CI_parallel_GPU.yml`), for the develop PRs and `GMM_develop`.
-- Delete the superseded branches (`stack-pick/*`, `fix/gpu-port-develop`, `fix/gpu-port-GMM`, `discuss/legacy-shared-bugs`, `review/gpu-results` in the GPU fork; `legacy/te-sensor-padapt-mpi`, `legacy/sc-sensor-omp-shared` in the legacy fork). Do **not** touch `miguel_*`, `arr/*` and `feature/*`.
+- Delete the superseded branches; they still carry commits authored or committed by Claude (`fix/gpu-port-develop`, `fix/gpu-port-GMM`, `discuss/legacy-shared-bugs`, `legacy/sc-sensor-omp-shared`, `legacy/te-sensor-padapt-mpi`). This review branch also has `Claude-Session:` trailers in 12 commits; ask before rewriting it. Branches to delete (`stack-pick/*`, `fix/gpu-port-develop`, `fix/gpu-port-GMM`, `discuss/legacy-shared-bugs`, `review/gpu-results` in the GPU fork; `legacy/te-sensor-padapt-mpi`, `legacy/sc-sensor-omp-shared` in the legacy fork). Do **not** touch `miguel_*`, `arr/*` and `feature/*`.
 - Known, not being fixed here: see STATUS.md section 0 (new findings) and the list below.
   - Anisotropic orders crash on GPU in `HexMesh_ProlongSolToFaces`.
   - `Face_AdaptSolToFace` lost legacy's p-nonconforming interpolation.

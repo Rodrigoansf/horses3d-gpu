@@ -78,7 +78,7 @@ The threaded build, and Cylinder with 4 threads, were checked on the earlier com
 **GPU (RTX 3060 laptop, nvfortran 26.3, one GPU), this branch against `develop`:**
 - The 17 cases of `CI_serial_GPU.yml` plus `TaylorGreenSVVLES`: every monitor file is **bitwise identical** to `develop`, and every case passes the same asserts.
 - `Cylinder` was run with one local, uncommitted line added to its control file, because on `develop` it now crashes on the GPU before the first step (see the "ParamfileRegions" PR). The line gives monitor 3 a `Reference surface`, which only lift and drag use, so it changes no result; with the ParamfileRegions fix the unmodified file gives bitwise the same output.
-- **Device memory left at exit**, from an `NV_ACC_NOTIFY=16` allocation trace (allocations without a matching free). Measured with all six review PRs stacked; only this one touches device allocation:
+- **Device memory left at exit**, from an `NV_ACC_NOTIFY=16` allocation trace on 15 Oct (allocations without a matching free; the trace logs were not kept, `gpu-wt/tools/leaks.py` re-derives the numbers from a new trace). Measured with all six review PRs stacked; only this one touches device allocation:
 
   | case | `develop` | with this PR |
   |---|---|---|
@@ -87,6 +87,6 @@ The threaded build, and Cylinder with 4 threads, were checked on the earlier com
 
   The few that remain are small boundary-condition and probe buffers created outside the mesh.
 - **Truncation-error sensor**: on `develop`, a run with `Shock sensor = truncation error` stops at once with `cuMemAlloc ... CUDA_ERROR_INVALID_VALUE` (the `Face_Assign` alias). With this branch the small TE cases in `review/scratch-cases` (`te.control`, `te-std.control`) run to the end on the GPU.
-- Speed: with all six review PRs stacked, each case was run interleaved with `develop`, twice, with nothing else on the machine. In the second repetition, with the laptop GPU at a steady temperature, every case is within ±0.5% of `develop`'s solver efficiency (median ratio 0.999). The first repetition scatters by up to ±30% in both directions while the GPU heats up and throttles.
+- Speed: with all six review PRs stacked, each case was run interleaved with `develop`, twice, with nothing else on the machine. In the second repetition, with the laptop GPU at a steady temperature, every case is within 0.6% of `develop`'s solver efficiency, from 0.54% faster (`IBM_Cylinder`) to 0.37% slower (`CylinderUdissStandard`), with no systematic shift (median +0.02%). The first repetition scatters by up to ±30% in both directions while the GPU heats up and throttles.
 
 **Not checked:** multi-GPU. The cluster CI (`CI_parallel_GPU.yml`) should be run on this branch before merging.

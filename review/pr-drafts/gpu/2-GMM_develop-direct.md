@@ -36,7 +36,7 @@ It is now ported like the other methods (the `SCDEV_DISPATCH` convention in `Sho
 No `Q` or gradient transfers are added. The face prolongation is unchanged: like the other methods, SVV now goes through `SC_ProlongAviscFluxToFaces` (still a host round trip, as before; porting it is the remaining step for a fully device-resident artificial viscosity).
 
 Two things found while porting, not changed beyond what the port needs:
-- With the Smagorinsky update and no `alpha/mu` ratio, `SVV_viscosity` leaves `alpha` undefined; the device path uses zero.
+- With the Smagorinsky update and no `alpha/mu` ratio, `SVV_viscosity` would leave `alpha` undefined, but that combination never runs: `AV_initialize` stops with "Alpha must be proportional to mu when using shock-capturing with LES". The device path's zero is only a default (the commit message and code comment overstate this).
 - `SC_viscosity` (host) never applies the first method where `sensor >= 1`, but the device `SC_ComputeElementAviscFlux` does when there is no second method. SVV keeps the host behaviour; the non-SVV device path is unchanged.
 
 Results, before the develop merge (`gmm/next`):
