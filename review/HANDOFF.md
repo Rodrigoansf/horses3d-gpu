@@ -36,10 +36,10 @@ Pushing uses SSH (`git@github.com:Rodrigoansf/...`) with the user's `~/.ssh/Rod`
 
 Done: the commit-attribution rewrite (15 Oct), the team decision on targets, all branches rebased and tested on the laptop GPU. **Read `review/STATUS.md` section 0 for the branch table.** In short:
 
-- horses3d-gpu fork PRs to `develop`: #1 minor fixes, #3 split-form, #4 SVV divV, #5 TE source term, #6 limiter, #7 aliasing realloc, plus a new one for `fix/paramfile-scalar-dealloc`. #4 and #5 moved from `GMM_develop` to `develop` (change the base in the PR page). #2 (`fix/minor-GMM`) is obsolete: close it.
+- horses3d-gpu fork PRs to `develop`: #1 minor fixes, #3 split-form, #4 SVV divV, #5 TE source term, #6 limiter, #7 aliasing realloc, #8 ParamfileRegions. #4 and #5 now target `develop`; #2 (`fix/minor-GMM`) is closed. `gh` is installed and logged in (2.45: `gh pr edit` fails on GitHub's retired classic Projects API, use `gh api -X PATCH repos/<repo>/pulls/<n>` instead).
 - horses-framework `GMM_develop` was pushed directly (approved by the user; fast-forward): the GMM fixes, the **SVV GPU port**, a merge of `develop`, and the develop fixes the user asked for. Record: `review/pr-drafts/gpu/2-GMM_develop-direct.md`.
 - Legacy fork PRs #1–#5 to `master`, rebased on `a01ca08b4`.
-- PR descriptions: `review/pr-drafts/` (updated with the test results; paste them into the fork PRs).
+- PR descriptions: `review/pr-drafts/`, already copied into every fork PR (17 Oct).
 
 The user's rule now: **no PRs in horses-framework until they have reviewed everything with all tests done.** Pushing to `GMM_develop` (their research branch) is allowed after testing.
 

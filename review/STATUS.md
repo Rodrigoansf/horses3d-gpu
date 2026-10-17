@@ -10,12 +10,12 @@ Team decision (15 Oct): the review changes go in split by feature, to `develop` 
 |---|---|---|
 | #1 | `fix/minor-develop` | 11 commits: Face_Assign, NodalStorage mapping, enter/exit data balance, `sem` teardown, TE sensor `pAdapt_MPI`, sensor OpenMP `shared` lists, ActuatorLine guard, 3 OpenMP fixes, multiphase "source" monitor |
 | #3 | `change/strong-form-split-fluxes` | split-form sharp fluxes never computed (strong-form volume term, aliasing sensor) |
-| #4 | `change/svv-energy-divv` | SVV `divV` + TaylorGreenSVVLES references (no effect on develop yet: SC isn't applied there) — base moved from GMM_develop to develop |
-| #5 | `change/te-sensor-source-term` | TE sensor source term — base moved from GMM_develop to develop |
+| #4 | `change/svv-energy-divv` | SVV `divV` + TaylorGreenSVVLES references (no effect on develop yet: SC isn't applied there); base now develop |
+| #5 | `change/te-sensor-source-term` | TE sensor source term; base now develop |
 | #6 | `change/limiter-pressure-reference` | limiter uses p(q_avg) |
 | #7 | `fix/aliasing-sensor-realloc` | aliasing sensor scratch-array realloc |
-| new | `fix/paramfile-scalar-dealloc` | ParamfileRegions: avoid the nvfortran 26.3 crash that breaks `Cylinder` on the GPU since horses-framework/horses3d-gpu#119 |
-| #2 | `fix/minor-GMM` | obsolete: its commits are in GMM_develop now; close it |
+| #8 | `fix/paramfile-scalar-dealloc` | ParamfileRegions: avoid the nvfortran 26.3 crash that breaks `Cylinder` on the GPU since horses-framework/horses3d-gpu#119 |
+| #2 | `fix/minor-GMM` | closed: its commits are in GMM_develop |
 
 **horses-framework GMM_develop** (pushed directly, fast-forward from `630879e6`): the five `fix/minor-GMM` commits, SVV divV + references, TE source term, **SVV on the GPU** (device port), merge of develop, split-form (2), aliasing realloc, ParamfileRegions. See `pr-drafts/gpu/2-GMM_develop-direct.md`.
 
