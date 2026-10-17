@@ -10,6 +10,7 @@ module Storage
    public Mesh_t, Element_t, Boundary_t
    public NVARS, NGRADVARS, hasMPIranks, hasBoundaries, isOldStats
    public partitionFileName, boundaryFileName, flowEq
+   public gradVarsOfSolution, SetGradientVariablesOfSolution
    public hasExtraGradients, hasMu_NS, hasUt_NS, hasWallY, NSTAT, hasMu_sgs
 
    integer                          :: NVARS, NGRADVARS
@@ -20,6 +21,7 @@ module Storage
    logical                          :: hasWallY     = .false.
    logical                          :: hasMu_sgs = .false.
    character(len=LINE_LENGTH)       :: boundaryFileName, partitionFileName, flowEq
+   integer                          :: gradVarsOfSolution = GRADVARS_STATE   ! Gradient variables of the saved gradients
    integer, parameter               :: NSTAT = 9
 
    type Element_t
@@ -313,13 +315,18 @@ module Storage
 !        ---------------------
          self % refs = getSolutionFileReferenceValues(trim(solutionName))
 !
+!        The entropy-variable conversion of the saved gradients evaluates the
+!        pressure with the solver's Pressure(Q), i.e. with the module
+!        thermodynamics, which horses2plt never constructs (gamma - 1 = 0 gave
+!        p = 0 and NaN velocity gradients). Take gamma and R from the file.
+!        -------------------------------------------------------------------
+         if (self % refs(GAMMA_REF) > 1.0_RP) call SetThermodynamicsFromRefs(self % refs)
+!
 !        Read coordinates
 !        ----------------
          fid = putSolutionFileInReadDataMode(solutionName)
 
-         ! call set_getVelocityGradients(GRADVARS_STATE) ! FIXME: MIGHT BE NEEDED FOR HORSES2PLT
-         ! write(STD_OUT,'(15X,A)') " WARNING horses2tecplot.90 :: Velocity Gradients set to default (GRADVARS_STATE)"
-      
+
          if ( .not. isOldStats ) then
          ! if ( .not. self % isStatistics ) then
             do eID = 1, self % no_of_elements
@@ -375,10 +382,10 @@ module Storage
                   read(fid) e % Q_y
                   read(fid) e % Q_z
 
-!                 Call set_getVelocityGradients to make the pointer to the actual subroutine, is needed only for the NS
-!                 Set state as is the default option TODO point to the correct one if its possible (oscar note)
-!                 ---------------------------
-                  call set_getVelocityGradients(GRADVARS_STATE)
+!                 Call set_getVelocityGradients to make the pointer to the actual subroutine, is needed only for the NS.
+!                 The saved gradients are those of the gradient variables used by the solver (--gradient-variables)
+!                 ----------------------------------------------------------------------------------------------------
+                  call set_getVelocityGradients(gradVarsOfSolution)
 
                   ! Following block works for NS, CH, NSCH and iNS .... but not iNSCH: change 5 by 6 to use iNSCH (NS won't work)
                   if (NVARS .ge. 5) then
@@ -572,4 +579,67 @@ module Storage
       end select
           
       End Subroutine getNVARS
+!
+!////////////////////////////////////////////////////////////////////////
+!
+      subroutine SetGradientVariablesOfSolution(gradVarsName)
+!
+!        **********************************************************
+!        Sets the gradient variables of the gradients stored in the
+!        solution file: "state", "entropy" or "energy".
+!        **********************************************************
+!
+         use Utilities, only: toLower
+         implicit none
+         character(len=*), intent(in) :: gradVarsName
+         character(len=LINE_LENGTH)   :: name
+
+         name = gradVarsName
+         call toLower(name)
+
+         select case (trim(name))
+         case ("state")
+            gradVarsOfSolution = GRADVARS_STATE
+         case ("entropy")
+            gradVarsOfSolution = GRADVARS_ENTROPY
+         case ("energy")
+            gradVarsOfSolution = GRADVARS_ENERGY
+         case default
+            write(STD_OUT,'(A,A,A)') 'Gradient variables "', trim(gradVarsName), '" not recognized.'
+            write(STD_OUT,'(A)') "Options:"
+            write(STD_OUT,'(A)') "   * state"
+            write(STD_OUT,'(A)') "   * entropy"
+            write(STD_OUT,'(A)') "   * energy"
+            errorMessage(STD_OUT)
+            error stop
+         end select
+
+      end subroutine SetGradientVariablesOfSolution
+!
+!////////////////////////////////////////////////////////////////////////
+!
+      subroutine SetThermodynamicsFromRefs(refs)
+!
+!        *************************************************************
+!        Thermodynamic constants from the reference values saved in a
+!        solution file, built as in PhysicsStorage_NS (ThermodynamicsAir).
+!        *************************************************************
+!
+         use FluidData, only: Thermodynamics_t, SetThermodynamics
+         implicit none
+         real(kind=RP), intent(in) :: refs(NO_OF_SAVED_REFS)
+         type(Thermodynamics_t)    :: thermo
+         real(kind=RP)             :: g, R
+
+         g = refs(GAMMA_REF)
+         R = refs(RGAS_REF)
+         thermo = Thermodynamics_t("From solution file", R, g, sqrt(g), g - 1.0_RP,  &
+                                   (g - 1.0_RP) / 2.0_RP, (g + 1.0_RP) / 2.0_RP,       &
+                                   (g - 1.0_RP) / (2.0_RP * sqrt(g)),                  &
+                                   (g - 1.0_RP) / (2.0_RP * g), 2.0_RP / (g + 1.0_RP), &
+                                   1.0_RP / (g - 1.0_RP), 1.0_RP / g, g / (g - 1.0_RP),&
+                                   R * g / (g - 1.0_RP), R / (g - 1.0_RP), 0.0_RP)
+         call SetThermodynamics(thermo)
+
+      end subroutine SetThermodynamicsFromRefs
 end module Storage

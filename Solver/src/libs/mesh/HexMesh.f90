@@ -1110,6 +1110,7 @@ slavecoord:             DO l = 1, 4
          !-local-variables----------------------------------------------------
          integer            :: mpifID, fID, thisSide, domain
          integer            :: i, j, counter
+         integer            :: eIDmax
          !--------------------------------------------------------------------
 
          if ( .not. MPI_Process % doMPIAction ) return
@@ -1137,8 +1138,9 @@ slavecoord:             DO l = 1, 4
             do mpifID = 1, self % MPIfaces % faces(domain) % no_of_faces
                fID = self % MPIfaces % faces(domain) % faceIDs(mpifID)
                thisSide = self % MPIfaces % faces(domain) % elementSide(mpifID)
+               eIDmax = maxval(self % faces(fID) % elementIDs)   ! plain integer: nvfortran 26.3 ICEs on the expression inside the associate (MPI builds)
                associate( f => self % faces(fID))
-               associate( e => self % elements(maxval(f % elementIDs)) )
+               associate( e => self % elements(eIDmax) )
 
 
                self % MPIfaces % faces(domain) % Nsend(counter:counter+1  ) = e % Nxyz(axisMap(:,f % elementSide(thisSide)))
@@ -1568,6 +1570,13 @@ slavecoord:             DO l = 1, 4
                   counter = counter + nEqn
                end do               ; end do
                end associate
+!
+!              The neighbour's flux was unpacked on the host, but computeMPIFaceFlux
+!              runs on the device: without this the device keeps the value pushed
+!              by TimeDerivative_ComputeArtificialViscosity, i.e. the neighbour's
+!              flux from the previous stage. No-op on CPU builds.
+!              ----------------------------------------------------------------
+               !$acc update device(self % faces(fID) % storage(otherSide(thisSide)) % AviscFlux)
             end do
          end do
 #endif
@@ -2235,6 +2244,7 @@ slavecoord:             DO l = 1, 4
          integer  :: Nxyz(NDIM)
          integer  :: domain, MPI_NDOFS(MPI_Process % nProcs), mpifID
          integer  :: num_of_Faces, ii
+         integer  :: eIDmax
          integer, parameter :: other(2) = [2, 1]
          !--------------------------------------------------------------
 
@@ -2331,8 +2341,9 @@ slavecoord:             DO l = 1, 4
                   fID  = self % MPIfaces % faces(domain) % faceIDs(mpifID)
                   side = self % MPIfaces % faces(domain) % elementSide(mpifID)   ! face side 1/2
 
+                  eIDmax = maxval(self % faces(fID) % elementIDs)   ! plain integer: nvfortran 26.3 ICEs on the expression inside the associate (MPI builds)
                   associate( f => self % faces(fID) )
-                  associate( e => self % elements(maxval(f % elementIDs)) )
+                  associate( e => self % elements(eIDmax) )
 
                   sideL = f % elementSide(side)                                  ! element side 1/2/3/4/5/6
 
@@ -4483,6 +4494,10 @@ slavecoord:             DO l = 1, 4
 #ifdef INCNS
          !$acc enter data copyin(self % elements(eID) % storage % Q_grad_iNS) !iNS state to calculate the gradient
 #endif
+#ifdef NAVIERSTOKES
+         !$acc enter data copyin(self % elements(eID) % storage % Q_grad_NS)  !NS gradient variables to differentiate
+         !$acc enter data copyin(self % elements(eID) % storage % AviscContravariantFlux) !Shock-capturing artificial viscous flux
+#endif
 #ifdef CAHNHILLIARD
          !$acc enter data copyin(self % elements(eID) % storage % c)     ! CHE concentration
          !$acc enter data copyin(self % elements(eID) % storage % cDot)  ! CHE concentration time derivative
@@ -4541,6 +4556,10 @@ slavecoord:             DO l = 1, 4
          !$acc enter data copyin(self % faces(iFace) % storage(2) % unStar)
          !$acc enter data copyin(self % faces(iFace) % storage(1) % rho)
          !$acc enter data copyin(self % faces(iFace) % storage(2) % rho)
+#ifdef NAVIERSTOKES
+         !$acc enter data copyin(self % faces(iFace) % storage(1) % AviscFlux) !Shock-capturing artificial viscous flux
+         !$acc enter data copyin(self % faces(iFace) % storage(2) % AviscFlux) !Shock-capturing artificial viscous flux
+#endif
          !$acc enter data copyin(self % faces(iFace) % geom)
          !$acc enter data copyin(self % faces(iFace) % geom % x)
          !$acc enter data copyin(self % faces(iFace) % geom % h)
@@ -4665,6 +4684,10 @@ slavecoord:             DO l = 1, 4
 #ifdef INCNS
          !$acc exit data delete(self % elements(eID) % storage % Q_grad_iNS) !iNS state to calculate the gradient
 #endif
+#ifdef NAVIERSTOKES
+         !$acc exit data delete(self % elements(eID) % storage % Q_grad_NS)  !NS gradient variables to differentiate
+         !$acc exit data delete(self % elements(eID) % storage % AviscContravariantFlux) !Shock-capturing artificial viscous flux
+#endif
 #ifdef CAHNHILLIARD
          !$acc exit data delete(self % elements(eID) % storage % c)     ! CHE concentration
          !$acc exit data delete(self % elements(eID) % storage % cDot)  ! CHE concentration time derivative
@@ -4712,6 +4735,10 @@ slavecoord:             DO l = 1, 4
          !$acc exit data delete(self % faces(iFace) % storage(1) % unStar)
          !$acc exit data delete(self % faces(iFace) % storage(2) % fStar)
          !$acc exit data delete(self % faces(iFace) % storage(2) % unStar)
+#ifdef NAVIERSTOKES
+         !$acc exit data delete(self % faces(iFace) % storage(1) % AviscFlux) !Shock-capturing artificial viscous flux
+         !$acc exit data delete(self % faces(iFace) % storage(2) % AviscFlux) !Shock-capturing artificial viscous flux
+#endif
          !$acc exit data delete(self % faces(iFace) % storage)
          !$acc exit data delete(self % faces(iFace) % storage(1) % rho)
          !$acc exit data delete(self % faces(iFace) % storage(2) % rho)
@@ -5680,21 +5707,63 @@ call elementMPIList % destruct
    end subroutine HexMesh_UpdateHOArrays
 
    subroutine HexMesh_ComputeLocalGradientNS(self, set_mu)
+#if defined(NAVIERSTOKES) && (!defined(SPALARTALMARAS))
+      use VariableConversion, only: NSGradientVariables_selector
+#endif
       implicit none
       !-arguments-----------------------------------------
       type(HexMesh), intent(inout)    :: self
       logical, intent(in)             :: set_mu
       !-local-variables-----------------------------------
-      integer :: eID
+      integer :: eID, i, j, k
 
       !--------------------------------------------------
+!
+!
+!     GRADVARS_DISPATCH -- the DG operator must differentiate the *gradient
+!     variables*, which coincide with the conservative ones only when
+!     "gradient variables = state". The conversion is delegated to
+!     NSGradientVariables_selector so that this routine never needs to know
+!     which sets exist; adding a new set means editing that selector only.
+!
+!     Note: for GRADVARS_STATE the conversion degenerates to a copy into
+!     Q_grad_NS, i.e. one extra O((N+1)^3) write+read per element on what is
+!     otherwise an O((N+1)^4) kernel. This was measured on GPU (RTX 3060,
+!     test/NavierStokes/Cylinder, P=3, 1864 elements, 100 steps): median
+!     12.54 s before vs 12.60 s after, a +0.5% delta against a run-to-run
+!     spread of +/-4.8%. In other words the single code path is free in
+!     practice. If a future case ever shows otherwise, reinstate a
+!     "differentiate storage % Q directly" branch for STATE here -- nothing
+!     else in the dispatch chain needs to change.
+!     -------------------------------------------------------------------------
+#if defined(NAVIERSTOKES) && (!defined(SPALARTALMARAS))
 !$omp do schedule(runtime)
       !$acc parallel loop gang vector_length(128) present(self) async(1)
-         do eID = 1 , size(self % elements)
-            call HexElement_ComputeLocalGradient(self % elements(eID), NCONS, NGRAD, self % elements(eID) % storage % Q)
-         end do
+      do eID = 1 , size(self % elements)
+
+         !$acc loop vector collapse(3)
+         do k = 0, self % elements(eID) % Nxyz(3) ; do j = 0, self % elements(eID) % Nxyz(2) ; do i = 0, self % elements(eID) % Nxyz(1)
+            call NSGradientVariables_selector(NCONS, NGRAD, self % elements(eID) % storage % Q(:,i,j,k), &
+                                                           self % elements(eID) % storage % Q_grad_NS(:,i,j,k))
+         end do         ; end do         ; end do
+
+         call HexElement_ComputeLocalGradient(self % elements(eID), NCONS, NGRAD, self % elements(eID) % storage % Q_grad_NS)
+      end do
       !$acc end parallel loop
 !$omp end do nowait
+#else
+!
+!     Physics without NSGradientVariables_selector (multiphase, NSSA, ...):
+!     differentiate the state directly, as on develop
+!     ---------------------------------------------------------------------
+!$omp do schedule(runtime)
+      !$acc parallel loop gang vector_length(128) present(self) async(1)
+      do eID = 1 , size(self % elements)
+         call HexElement_ComputeLocalGradient(self % elements(eID), NCONS, NGRAD, self % elements(eID) % storage % Q)
+      end do
+      !$acc end parallel loop
+!$omp end do nowait
+#endif
 
    end subroutine HexMesh_ComputeLocalGradientNS
 

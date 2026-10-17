@@ -9,12 +9,13 @@ module VariableConversion_NS
    public   Pressure, Temperature, TemperatureDeriv, PressureDot
    public   get_laminar_mu_kappa, SutherlandsLaw
    public   NSGradientVariables_STATE
+   public   NSGradientVariables_selector
    public   NSGradientVariables_ENTROPY
    public   NSGradientVariables_ENERGY
    public   getPrimitiveVariables, getEntropyVariables
    public   getRoeVariables, GetNSViscosity, getVelocityGradients, getTemperatureGradient, getConservativeGradients
    public   set_getVelocityGradients
-   public   getVelocityGradients_State
+   public   getVelocityGradients_State, getVelocityGradients_selector
   
 
    interface getTemperatureGradient
@@ -270,6 +271,65 @@ module VariableConversion_NS
 !
 ! /////////////////////////////////////////////////////////////////////
 !
+!  =====================================================================
+!  GRADVARS_DISPATCH -- gradient-variable dispatch: START HERE
+!  =====================================================================
+!
+!  Device-side equivalent of the host GetGradients procedure pointer. Every
+!  place that converts the state into gradient variables must go through a
+!  selector, otherwise parts of the discretization end up working in different
+!  variable sets and the scheme is silently inconsistent (this has already
+!  happened once: volume in entropy, viscous flux in state).
+!
+!  There are two front doors:
+!     NSGradientVariables_selector  (this file)  -- Q  ->  gradient variables
+!     ViscousFlux_selector_0D       (Physics_NS) -- viscous flux in those variables
+!
+!  TO ADD A NEW GRADIENT-VARIABLE SET: add a case to both selectors, to
+!  getVelocityGradients_selector (this file, used by device code such as the
+!  LES models) and to SetGradientVariables (PhysicsStorage_NS). Callers need no
+!  changes.
+!
+!  TO FIND EVERY DEPENDENT SITE:
+!
+!        grep -rn "GRADVARS_DISPATCH" Solver/src
+!
+!  Not every site can call a selector. Those are tagged
+!  "GRADVARS_DISPATCH (hardcoded)" with the reason, and are listed here so the
+!  list stays discoverable from the front door:
+!
+!     * Physics_NS.f90 : getStressTensor
+!         Computes genuinely different mathematics per set (it reconstructs the
+!         velocity gradient from whichever variables were differentiated), so it
+!         is not a dispatch onto sibling routines and cannot delegate.
+!         IF YOU ADD A VARIABLE SET YOU MUST EDIT IT TOO.
+!
+!  If a caller needs this idea but with different mathematics, do NOT inline a
+!  select case at the call site: add a sibling selector next to this one with a
+!  descriptive name (NSGradientVariables_selector_<PURPOSE>) so every variant
+!  stays in one place and one grep finds them all.
+!  =====================================================================
+!
+      pure subroutine NSGradientVariables_selector( nEqn, nGrad, Q, U )
+         !$acc routine seq
+         implicit none
+         integer,       intent(in)  :: nEqn, nGrad
+         real(kind=RP), intent(in)  :: Q(nEqn)
+         real(kind=RP), intent(out) :: U(nGrad)
+
+         select case (grad_vars)
+         case (GRADVARS_ENTROPY)
+            call NSGradientVariables_ENTROPY(nEqn, nGrad, Q, U)
+         case (GRADVARS_ENERGY)
+            call NSGradientVariables_ENERGY(nEqn, nGrad, Q, U)
+         case default
+            call NSGradientVariables_STATE(nEqn, nGrad, Q, U)
+         end select
+
+      end subroutine NSGradientVariables_selector
+!
+! /////////////////////////////////////////////////////////////////////
+!
       pure subroutine getPrimitiveVariables(U,V)
       !$acc routine seq
 !
@@ -430,11 +490,43 @@ module VariableConversion_NS
          pDivRho = Pressure(Q) / Q(IRHO)
          U = Q(IRHOU:IRHOW) / Q(IRHO)
 
-         U_x = pDivRho * Q_x(IRHOU:IRHOW) + U / pDivRho * Q_x(IRHOE)
-         U_y = pDivRho * Q_y(IRHOU:IRHOW) + U / pDivRho * Q_y(IRHOE)
-         U_z = pDivRho * Q_z(IRHOU:IRHOW) + U / pDivRho * Q_z(IRHOE)
+!
+!        With W(2:4) = rho*u/p and W(5) = -rho/p, u = -W(2:4)/W(5), hence
+!        grad u = (p/rho) * (grad W(2:4) + u * grad W(5)), the same expression
+!        ViscousFlux_ENTROPY and getStressTensor use. (Previously the last term
+!        was u / (p/rho) * grad W(5): wrong unless p/rho = 1, which in HORSES
+!        units means T = gamma*M**2. It fed the GMM and "div v" sensors, the
+!        NS artificial viscosity, the LES models and horses2plt.)
+!        ---------------------------------------------------------------------
+         U_x = pDivRho * (Q_x(IRHOU:IRHOW) + U * Q_x(IRHOE))
+         U_y = pDivRho * (Q_y(IRHOU:IRHOW) + U * Q_y(IRHOE))
+         U_z = pDivRho * (Q_z(IRHOU:IRHOW) + U * Q_z(IRHOE))
 
       end subroutine getVelocityGradients_Entropy
+!
+!     GRADVARS_DISPATCH -- device-callable equivalent of the getVelocityGradients
+!     procedure pointer (which cannot be called from an OpenACC region). Use it
+!     wherever velocity gradients are needed from the stored U_x/U_y/U_z inside
+!     device code, e.g. the LES models: those gradients are grad W for the
+!     selected "gradient variables", not grad Q.
+!     ---------------------------------------------------------------------------
+      pure subroutine getVelocityGradients_selector(Q,Q_x,Q_y,Q_z,U_x,U_y,U_z)
+         !$acc routine seq
+         implicit none
+         real(kind=RP), intent(in)  :: Q(NCONS)
+         real(kind=RP), intent(in)  :: Q_x(NGRAD), Q_y(NGRAD), Q_z(NGRAD)
+         real(kind=RP), intent(out) :: U_x(NDIM), U_y(NDIM), U_z(NDIM)
+
+         select case (grad_vars)
+         case (GRADVARS_ENTROPY)
+            call getVelocityGradients_Entropy(Q,Q_x,Q_y,Q_z,U_x,U_y,U_z)
+         case (GRADVARS_ENERGY)
+            call getVelocityGradients_Energy(Q,Q_x,Q_y,Q_z,U_x,U_y,U_z)
+         case default
+            call getVelocityGradients_State(Q,Q_x,Q_y,Q_z,U_x,U_y,U_z)
+         end select
+
+      end subroutine getVelocityGradients_selector
 
 !
 !/////////////////////////////////////////////////////////////////////////////
