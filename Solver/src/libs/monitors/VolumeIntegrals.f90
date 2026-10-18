@@ -842,7 +842,7 @@ module VolumeIntegrals
 
             case ( VELOCITY )
                 ! num_of_vars is equal to NDIM
-!$acc parallel loop gang present(mesh) num_gangs(9700) reduction(+:val1,val2,val3) async(1)
+!$acc parallel loop gang present(mesh) num_gangs(9700) reduction(+:val1,val2,val3)
 !$omp parallel do reduction(+:val1,val2,val3) private(val) schedule(guided)
          do eID = 1, mesh % no_of_elements
 !
