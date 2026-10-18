@@ -1307,10 +1307,11 @@ module SpatialDiscretization
 !        artificial viscosity was computed nowhere on this path, so enabling
 !        shock capturing changed the solution by exactly zero.
 !
-!        The element kernel is device-resident; the prolongation to faces is
-!        not yet (see SC_ProlongAviscFluxToFaces), hence the round trip. Once
-!        the prolongation is ported, the three data clauses here disappear and
-!        the whole routine becomes a single parallel loop.
+!        Both the element kernel and the prolongation to the faces
+!        (SC_ProlongAviscFluxToFaces) are device-resident: the flux stays on
+!        the GPU. Only the SVV dissipation (one scalar per element) comes back,
+!        and, in MPI runs, this side of each MPI face for the exchange
+!        (HexMesh_UpdateMPIFacesAviscFlux).
 !        ---------------------------------------------------------------------
 !
          use HexMeshClass
@@ -1325,18 +1326,13 @@ module SpatialDiscretization
                call SC_ComputeElementAviscFlux(mesh % elements(eID), eID)
             end do
             !$acc end parallel loop
-            !$acc wait(1)
 !
 !           SVV dissipation for the volume monitors (SVV runs only)
 !           ------------------------------------------------------
             call SC_UpdateHostArtificialDiss(mesh)
 !
-!           Device -> host, prolong, host -> device (temporary, see above)
-!           --------------------------------------------------------------
-            do eID = 1, size(mesh % elements)
-               !$acc update self(mesh % elements(eID) % storage % AviscContravariantFlux)
-            end do
-
+!           Element flux -> faces, on the device
+!           ------------------------------------
             call SC_ProlongAviscFluxToFaces(mesh)
 
          else
@@ -1352,12 +1348,12 @@ module SpatialDiscretization
                                     mesh % elements(eID) % storage % AviscContravariantFlux)
             end do
 
-         end if
+            do fID = 1, size(mesh % faces)
+               !$acc update device(mesh % faces(fID) % storage(1) % AviscFlux)
+               !$acc update device(mesh % faces(fID) % storage(2) % AviscFlux)
+            end do
 
-         do fID = 1, size(mesh % faces)
-            !$acc update device(mesh % faces(fID) % storage(1) % AviscFlux)
-            !$acc update device(mesh % faces(fID) % storage(2) % AviscFlux)
-         end do
+         end if
 
       end subroutine TimeDerivative_ComputeArtificialViscosity
 !
