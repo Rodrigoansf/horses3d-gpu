@@ -1042,6 +1042,7 @@ module ShockCapturing
       type(HexMesh), intent(inout) :: mesh
       integer :: eID, fID
 
+!$omp do schedule(runtime)
 !$acc parallel loop gang collapse(2) present(mesh) num_gangs(size(mesh % elements)) vector_length(32) async(1)
       do eID = 1, size(mesh % elements)
          do fID = 1, 6
@@ -1050,6 +1051,7 @@ module ShockCapturing
                                                 mesh % elements(eID) % storage % AviscContravariantFlux, fID)
       end do ; end do
 !$acc end parallel loop
+!$omp end do
 
    end subroutine SC_ProlongAviscFluxToFaces
 !

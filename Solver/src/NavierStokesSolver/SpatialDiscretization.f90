@@ -1320,12 +1320,19 @@ module SpatialDiscretization
          integer :: eID, fID
 
          if (SCdev_onDevice) then
-
+!
+!           Every OpenMP thread of ComputeTimeDerivative's parallel region
+!           runs this routine, so the element loop must be shared: SVV filters
+!           in place through AviscContravariantFlux and SVVdev_W, and two
+!           threads on the same element would read each other's passes.
+!           ---------------------------------------------------------------
+!$omp do schedule(runtime)
             !$acc parallel loop gang present(mesh) async(1)
             do eID = 1, size(mesh % elements)
                call SC_ComputeElementAviscFlux(mesh % elements(eID), eID)
             end do
             !$acc end parallel loop
+!$omp end do
 !
 !           SVV dissipation for the volume monitors (SVV runs only)
 !           ------------------------------------------------------
