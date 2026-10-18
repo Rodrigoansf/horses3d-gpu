@@ -4611,9 +4611,12 @@ slavecoord:             DO l = 1, 4
          !$acc enter data copyin(self % zones(zoneID) % toBeDeleted)     
       enddo
 
+!     Copy the whole NodalStorage array, then attach each constructed order's matrices.
+!     Copying one element at a time leaves the device pointer NodalStorage attached to a
+!     single element, so kernels could only index one order.
+      !$acc enter data copyin(NodalStorage)
       DO i = 0, ubound(NodalStorage,1)
          if (.not. NodalStorage(i) % Constructed) cycle
-         !$acc enter data copyin(NodalStorage(i))
          !$acc enter data copyin(NodalStorage(i) % hatD)
          if (allocated(NodalStorage(i) % sharpD)) then
             !$acc enter data copyin(NodalStorage(i) % sharpD)
@@ -4802,8 +4805,8 @@ slavecoord:             DO l = 1, 4
          !$acc exit data delete (NodalStorage(i) % v)
          !$acc exit data delete (NodalStorage(i) % w)
          !$acc exit data delete (NodalStorage(i) % x)
-         !$acc exit data delete (NodalStorage(i))
       END DO
+      !$acc exit data delete (NodalStorage)
 
 #ifdef _HAS_MPI_
       !$acc exit data delete (self % faces_mpi)
