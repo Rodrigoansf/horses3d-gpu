@@ -98,6 +98,16 @@ module VolumeIntegrals
 !        Initialization
 !        --------------
          val = 0.0_RP
+#ifdef _OPENACC
+!
+!        On the GPU, Q, QDot and the gradients are only up to date on the
+!        device (the host copy is refreshed when a solution file is saved).
+!        The volume only needs the geometry, so it stays on the host.
+!        -------------------------------------------------------------------
+         if ( integralType .ne. VOLUME ) then
+            val = ScalarVolumeIntegral_Device(mesh, integralType)
+         else
+#endif
 !
 !        Loop the mesh
 !        -------------
@@ -111,6 +121,9 @@ module VolumeIntegrals
 
          end do
 !$omp end parallel do
+#ifdef _OPENACC
+         end if
+#endif
 
 #ifdef _HAS_MPI_
             localVal = val
@@ -554,6 +567,228 @@ module VolumeIntegrals
          end associate
 
       end function ScalarVolumeIntegral_Local
+#ifdef _OPENACC
+!
+!////////////////////////////////////////////////////////////////////////////////////////
+!
+      function ScalarVolumeIntegral_Device(mesh, integralType) result(val)
+!
+!        -----------------------------------------------------------------
+!           GPU version of the loop in ScalarVolumeIntegral: the integral
+!           is reduced on the device, where Q, QDot and the gradients are
+!           up to date, and only the scalar is copied back (as in
+!           VectorVolumeIntegral). The integrand at each node is computed
+!           by ScalarVolumeIntegrand.
+!        -----------------------------------------------------------------
+!
+         implicit none
+         class(HexMesh),      intent(in)  :: mesh
+         integer,             intent(in)  :: integralType
+         real(kind=RP)                    :: val
+!
+!        ---------------
+!        Local variables
+!        ---------------
+!
+         integer       :: eID, i, j, k
+         real(kind=RP) :: localVal
+!
+!        Integrals with a device integrand. The others (enstrophy, kinetic
+!        energy balance and entropy balance in Navier-Stokes, acoustic
+!        energy) would read stale host data, so the run stops instead.
+!        -----------------------------------------------------------------
+         select case ( integralType )
+#if defined(NAVIERSTOKES) && (!(SPALARTALMARAS))
+         case ( KINETIC_ENERGY, KINETIC_ENERGY_RATE, VELOCITY, ENTROPY, MATH_ENTROPY, &
+                ENTROPY_RATE, ARTIFICIAL_DISSIPATION, INTERNAL_ENERGY )
+#endif
+#if defined(INCNS)
+         case ( MASS, ENTROPY, KINETIC_ENERGY_RATE, ENTROPY_RATE )
+#endif
+#if defined(MULTIPHASE)
+         case ( ENTROPY_RATE, ENTROPY_BALANCE, PHASE2_AREA, PHASE2_XCOG, PHASE2_XVEL )
+#endif
+#if defined(CAHNHILLIARD)
+         case ( FREE_ENERGY )
+#endif
+         case default
+            write(STD_OUT,'(A,I0,A)') 'ScalarVolumeIntegral :: ERROR: volume integral ', integralType, &
+                                      ' is not available on the GPU. Remove the volume monitor or run on the CPU.'
+            error stop 99
+         end select
+
+         val = 0.0_RP
+
+!$acc parallel loop gang present(mesh) reduction(+:val)
+         do eID = 1, mesh % no_of_elements
+!
+            localVal = 0.0_RP
+
+            !$acc loop vector collapse(3) reduction(+:localVal)
+            do k = 0, mesh % elements(eID) % Nxyz(3) ; do j = 0, mesh % elements(eID) % Nxyz(2) ; do i = 0, mesh % elements(eID) % Nxyz(1)
+
+                localVal = localVal + NodalStorage(mesh % elements(eID) % Nxyz(1)) % w(i) * &
+                                      NodalStorage(mesh % elements(eID) % Nxyz(2)) % w(j) * &
+                                      NodalStorage(mesh % elements(eID) % Nxyz(3)) % w(k) * &
+                                      mesh % elements(eID) % geom % jacobian(i,j,k) * &
+                                      ScalarVolumeIntegrand(mesh % elements(eID), integralType, i, j, k)
+
+            end do            ; end do           ; end do
+
+#if defined(NAVIERSTOKES) && (!(SPALARTALMARAS))
+!
+!           The artificial (SVV) dissipation is stored once per element
+!           ------------------------------------------------------------
+            if ( integralType .eq. ARTIFICIAL_DISSIPATION ) then
+               localVal = localVal + mesh % elements(eID) % storage % artificialDiss
+            end if
+#endif
+            val = val + localVal
+
+         end do
+!$acc end parallel loop
+
+      end function ScalarVolumeIntegral_Device
+!
+!////////////////////////////////////////////////////////////////////////////////////////
+!
+      function ScalarVolumeIntegrand(e, integralType, i, j, k) result(val)
+!
+!        -----------------------------------------------------------------
+!           Integrand of ScalarVolumeIntegral_Device at node (i,j,k): the
+!           formulas of ScalarVolumeIntegral_Local, one node at a time.
+!           Q and the gradients are copied into small local arrays before
+!           the pointwise calls.
+!        -----------------------------------------------------------------
+!
+         !$acc routine seq
+         implicit none
+         type(Element), intent(in) :: e
+         integer,       intent(in) :: integralType
+         integer,       intent(in) :: i, j, k
+         real(kind=RP)             :: val
+!
+!        ---------------
+!        Local variables
+!        ---------------
+!
+         integer       :: eq
+         real(kind=RP) :: Qn(NCONS)
+         real(kind=RP) :: EntropyVars(NCONS)
+         real(kind=RP) :: Strain(NDIM,NDIM)
+         real(kind=RP) :: s, uvw, rho, mu, Ma2, fchem
+
+         val = 0.0_RP
+
+#if defined(NAVIERSTOKES) && (!(SPALARTALMARAS))
+         do eq = 1, NCONS
+            Qn(eq) = e % storage % Q(eq,i,j,k)
+         end do
+#endif
+
+         select case ( integralType )
+#if defined(NAVIERSTOKES) && (!(SPALARTALMARAS))
+         case ( KINETIC_ENERGY )
+            val = 0.5_RP * ( POW2(Qn(IRHOU)) + POW2(Qn(IRHOV)) + POW2(Qn(IRHOW)) ) / Qn(IRHO)
+
+         case ( KINETIC_ENERGY_RATE )
+            do eq = IRHOU, IRHOW
+               uvw = Qn(eq) / Qn(IRHO)
+               val = val + uvw * e % storage % QDot(eq,i,j,k) - 0.5_RP * POW2(uvw) * e % storage % QDot(IRHO,i,j,k)
+            end do
+
+         case ( VELOCITY )
+            val = sqrt( POW2(Qn(IRHOU)) + POW2(Qn(IRHOV)) + POW2(Qn(IRHOW)) ) / Qn(IRHO)
+
+         case ( ENTROPY )
+            val = log( Pressure(Qn) ) - thermodynamics % gamma * log( Qn(IRHO) )
+
+         case ( MATH_ENTROPY )
+            s   = log( Pressure(Qn) ) - thermodynamics % gamma * log( Qn(IRHO) )
+            val = - Qn(IRHO) * s / thermodynamics % gammaMinus1
+
+         case ( ENTROPY_RATE )
+            call NSGradientVariables_ENTROPY(NCONS, NGRAD, Qn, EntropyVars)
+            do eq = 1, NCONS
+               val = val + e % storage % QDot(eq,i,j,k) * EntropyVars(eq)
+            end do
+
+         case ( INTERNAL_ENERGY )
+            val = Qn(IRHOE)
+#endif
+
+#if defined(INCNS)
+         case ( MASS )
+            val = e % storage % Q(INSRHO,i,j,k)
+
+         case ( ENTROPY )
+            val =   0.5_RP * (  POW2(e % storage % Q(INSRHOU,i,j,k)) + POW2(e % storage % Q(INSRHOV,i,j,k)) &
+                              + POW2(e % storage % Q(INSRHOW,i,j,k)) ) / e % storage % Q(INSRHO,i,j,k)    &
+                  + 0.5_RP * POW2(e % storage % Q(INSP,i,j,k)) / thermodynamics % rho0c02
+
+         case ( KINETIC_ENERGY_RATE, ENTROPY_RATE )
+            do eq = INSRHOU, INSRHOW
+               uvw = e % storage % Q(eq,i,j,k) / e % storage % Q(INSRHO,i,j,k)
+               val = val + uvw * e % storage % QDot(eq,i,j,k) - 0.5_RP * POW2(uvw) * e % storage % QDot(INSRHO,i,j,k)
+            end do
+
+            if ( integralType .eq. ENTROPY_RATE ) then
+               val = val + (1.0_RP/thermodynamics % rho0c02) * e % storage % Q(INSP,i,j,k) * e % storage % QDot(INSP,i,j,k)
+            end if
+#endif
+
+#if defined(MULTIPHASE)
+         case ( ENTROPY_RATE, ENTROPY_BALANCE )
+            Ma2 = dimensionless % Ma2(1) * e % storage % Q(IMC,i,j,k) + dimensionless % Ma2(2) * (1.0_RP - e % storage % Q(IMC,i,j,k))
+
+            val =   e % storage % QDot(IMC,i,j,k) * e % storage % mu(1,i,j,k)          &
+                  + e % storage % Q(IMSQRHOU,i,j,k) * e % storage % QDot(IMSQRHOU,i,j,k) &
+                  + e % storage % Q(IMSQRHOV,i,j,k) * e % storage % QDot(IMSQRHOV,i,j,k) &
+                  + e % storage % Q(IMSQRHOW,i,j,k) * e % storage % QDot(IMSQRHOW,i,j,k) &
+                  + Ma2 * e % storage % Q(IMP,i,j,k) * e % storage % QDot(IMP,i,j,k)
+
+            if ( integralType .eq. ENTROPY_BALANCE ) then
+               mu = max(min(e % storage % Q(IMC,i,j,k),1.0_RP),0.0_RP)
+               mu = dimensionless % mu(2) + (dimensionless % mu(1) - dimensionless % mu(2))*mu
+               Strain(1,1) = e % storage % U_x(IGU,i,j,k)
+               Strain(2,2) = e % storage % U_y(IGV,i,j,k)
+               Strain(3,3) = e % storage % U_z(IGW,i,j,k)
+
+               Strain(1,2) = 0.5_RP * (e % storage % U_x(IGV,i,j,k) + e % storage % U_y(IGU,i,j,k))
+               Strain(1,3) = 0.5_RP * (e % storage % U_x(IGW,i,j,k) + e % storage % U_z(IGU,i,j,k))
+               Strain(2,3) = 0.5_RP * (e % storage % U_y(IGW,i,j,k) + e % storage % U_z(IGV,i,j,k))
+
+               Strain(2,1) = Strain(1,2)
+               Strain(3,1) = Strain(1,3)
+               Strain(3,2) = Strain(2,3)
+
+               val = val + 2.0_RP*mu*sum(Strain*Strain)  &
+                         + multiphase % M0 * (  POW2(e % storage % U_x(IGMU,i,j,k)) + POW2(e % storage % U_y(IGMU,i,j,k)) &
+                                              + POW2(e % storage % U_z(IGMU,i,j,k)) )
+            end if
+
+         case ( PHASE2_AREA )
+            val = 1.0_RP - e % storage % Q(IMC,i,j,k)
+
+         case ( PHASE2_XCOG )
+            val = e % geom % x(IX,i,j,k) * (1.0_RP - e % storage % Q(IMC,i,j,k))
+
+         case ( PHASE2_XVEL )
+            rho = dimensionless % rho(1) * e % storage % Q(IMC,i,j,k) + dimensionless % rho(2) * (1.0_RP - e % storage % Q(IMC,i,j,k))
+            val = e % storage % Q(IMSQRHOU,i,j,k) * (1.0_RP - e % storage % Q(IMC,i,j,k)) / sqrt(rho)
+#endif
+
+#if defined(CAHNHILLIARD)
+         case ( FREE_ENERGY )
+            call QuarticDWP(e % storage % c(1,i,j,k), fchem)
+            val = fchem + 0.5_RP * POW2(multiphase % eps) * (  POW2(e % storage % c_x(1,i,j,k)) &
+                                                             + POW2(e % storage % c_y(1,i,j,k)) &
+                                                             + POW2(e % storage % c_z(1,i,j,k)) )
+#endif
+         end select
+
+      end function ScalarVolumeIntegrand
+#endif
 !
 !////////////////////////////////////////////////////////////////////////////////////////
 !
