@@ -593,14 +593,22 @@ module VolumeIntegrals
          integer       :: eID, i, j, k
          real(kind=RP) :: localVal
 !
-!        Integrals with a device integrand. The others (enstrophy, kinetic
-!        energy balance and entropy balance in Navier-Stokes, acoustic
-!        energy) would read stale host data, so the run stops instead.
-!        -----------------------------------------------------------------
+!        Integrals with a device integrand. The others (kinetic energy
+!        balance and entropy balance in Navier-Stokes, acoustic energy)
+!        would read stale host data, so the run stops instead.
+!        --------------------------------------------------------------
          select case ( integralType )
 #if defined(NAVIERSTOKES) && (!(SPALARTALMARAS))
-         case ( KINETIC_ENERGY, KINETIC_ENERGY_RATE, VELOCITY, ENTROPY, MATH_ENTROPY, &
+         case ( KINETIC_ENERGY, KINETIC_ENERGY_RATE, ENSTROPHY, VELOCITY, ENTROPY, MATH_ENTROPY, &
                 ENTROPY_RATE, ARTIFICIAL_DISSIPATION, INTERNAL_ENERGY )
+!
+!           The device integrand gets the velocity gradients from the stored
+!           gradients of the state variables only
+!           -----------------------------------------------------------------
+            if ( integralType .eq. ENSTROPHY .and. grad_vars .ne. GRADVARS_STATE ) then
+               write(STD_OUT,'(A)') 'ScalarVolumeIntegral :: ERROR: on the GPU the enstrophy volume monitor needs "gradient variables = state".'
+               error stop 99
+            end if
 #endif
 #if defined(INCNS)
          case ( MASS, ENTROPY, KINETIC_ENERGY_RATE, ENTROPY_RATE )
@@ -673,7 +681,8 @@ module VolumeIntegrals
 !        ---------------
 !
          integer       :: eq
-         real(kind=RP) :: Qn(NCONS)
+         real(kind=RP) :: Qn(NCONS), Uxn(NGRAD), Uyn(NGRAD), Uzn(NGRAD)
+         real(kind=RP) :: Vx(NDIM), Vy(NDIM), Vz(NDIM)      ! Velocity gradients, Vx(IY) = dv/dx
          real(kind=RP) :: EntropyVars(NCONS)
          real(kind=RP) :: Strain(NDIM,NDIM)
          real(kind=RP) :: s, uvw, rho, mu, Ma2, fchem
@@ -696,6 +705,18 @@ module VolumeIntegrals
                uvw = Qn(eq) / Qn(IRHO)
                val = val + uvw * e % storage % QDot(eq,i,j,k) - 0.5_RP * POW2(uvw) * e % storage % QDot(IRHO,i,j,k)
             end do
+
+         case ( ENSTROPHY )
+            do eq = 1, NGRAD
+               Uxn(eq) = e % storage % U_x(eq,i,j,k)
+               Uyn(eq) = e % storage % U_y(eq,i,j,k)
+               Uzn(eq) = e % storage % U_z(eq,i,j,k)
+            end do
+            call getVelocityGradients_State(Qn, Uxn, Uyn, Uzn, Vx, Vy, Vz)
+
+            val =   POW2( Vy(IZ) - Vz(IY) ) &
+                  + POW2( Vz(IX) - Vx(IZ) ) &
+                  + POW2( Vx(IY) - Vy(IX) )
 
          case ( VELOCITY )
             val = sqrt( POW2(Qn(IRHOU)) + POW2(Qn(IRHOV)) + POW2(Qn(IRHOW)) ) / Qn(IRHO)
