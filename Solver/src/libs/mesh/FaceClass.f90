@@ -23,6 +23,7 @@
 
       private
       public   Face, Face_ProjectFluxToElements, Face_AdaptSolToFace, Face_AdaptGradientsToFace, Face_ProjectGradientFluxToElements
+      public   Face_AdaptAviscToFace
 !
 !     ************************************************************************************
 !
@@ -518,6 +519,48 @@
       end select
 
    end subroutine Face_AdaptAviscFluxToFace
+
+   ! Device version of Face_AdaptAviscFluxToFace, simplified as Face_AdaptSolToFace is:
+   ! it takes into account rotation (and the sign change of the right side) but not
+   ! projections. I.e., non-conforming (mortar) faces are not supported
+   subroutine Face_AdaptAviscToFace(self, nEqn, Nelx, Nely, AVn_e, side)
+      !$acc routine vector
+      use MappedGeometryClass
+      implicit none
+      type(Face),    intent(inout)  :: self
+      integer,       intent(in)     :: nEqn
+      integer,       intent(in)     :: Nelx, Nely
+      real(kind=RP), intent(in)     :: AVn_e(1:NCONS, 0:Nelx, 0:Nely)
+      integer,       intent(in)     :: side
+!
+!     ---------------
+!     Local variables
+!     ---------------
+!
+      integer       :: i, j, ii, jj, eq
+
+      select case (side)
+      case(1)
+            !$acc loop vector collapse(2)
+            do j = 0, self % NfLeft(2)   ; do i = 0, self % NfLeft(1)
+               !$acc loop seq
+               do eq = 1, nEqn
+                  self % storage(1) % AviscFlux(eq,i,j) = AVn_e(eq,i,j)
+               enddo
+            enddo ; enddo
+      case(2)
+         !$acc loop vector collapse(2)
+         do j = 0, self % NfRight(2)   ; do i = 0, self % NfRight(1)
+            call leftIndexes2Right(i,j,self % NfRight(1), self % NfRight(2), self % rotation, ii, jj)
+            !$acc loop seq
+            do eq = 1, nEqn
+               self % storage(2) % AviscFlux(eq,i,j) = -AVn_e(eq,ii,jj)
+            enddo
+         enddo ; enddo
+
+      end select
+
+   end subroutine Face_AdaptAviscToFace
 
    subroutine Face_ProjectFluxToElements(self, nEqn, flux, side)
       !$acc routine vector
