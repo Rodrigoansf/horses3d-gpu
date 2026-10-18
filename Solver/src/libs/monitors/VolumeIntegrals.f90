@@ -593,13 +593,13 @@ module VolumeIntegrals
          integer       :: eID, i, j, k
          real(kind=RP) :: localVal
 !
-!        Integrals with a device integrand. The others (enstrophy, kinetic
-!        energy balance and entropy balance in Navier-Stokes, acoustic
-!        energy) would read stale host data, so the run stops instead.
-!        -----------------------------------------------------------------
+!        Integrals with a device integrand. The others (kinetic energy
+!        balance and entropy balance in Navier-Stokes, acoustic energy)
+!        would read stale host data, so the run stops instead.
+!        --------------------------------------------------------------
          select case ( integralType )
 #if defined(NAVIERSTOKES) && (!(SPALARTALMARAS))
-         case ( KINETIC_ENERGY, KINETIC_ENERGY_RATE, VELOCITY, ENTROPY, MATH_ENTROPY, &
+         case ( KINETIC_ENERGY, KINETIC_ENERGY_RATE, ENSTROPHY, VELOCITY, ENTROPY, MATH_ENTROPY, &
                 ENTROPY_RATE, ARTIFICIAL_DISSIPATION, INTERNAL_ENERGY )
 #endif
 #if defined(INCNS)
@@ -673,8 +673,9 @@ module VolumeIntegrals
 !        ---------------
 !
          integer       :: eq
-         real(kind=RP) :: Qn(NCONS)
+         real(kind=RP) :: Qn(NCONS), Uxn(NGRAD), Uyn(NGRAD), Uzn(NGRAD)
          real(kind=RP) :: EntropyVars(NCONS)
+         real(kind=RP) :: Vx(NDIM), Vy(NDIM), Vz(NDIM)      ! Velocity gradients, Vx(IY) = dv/dx
          real(kind=RP) :: Strain(NDIM,NDIM)
          real(kind=RP) :: s, uvw, rho, mu, Ma2, fchem
 
@@ -696,6 +697,18 @@ module VolumeIntegrals
                uvw = Qn(eq) / Qn(IRHO)
                val = val + uvw * e % storage % QDot(eq,i,j,k) - 0.5_RP * POW2(uvw) * e % storage % QDot(IRHO,i,j,k)
             end do
+
+         case ( ENSTROPHY )
+            do eq = 1, NGRAD
+               Uxn(eq) = e % storage % U_x(eq,i,j,k)
+               Uyn(eq) = e % storage % U_y(eq,i,j,k)
+               Uzn(eq) = e % storage % U_z(eq,i,j,k)
+            end do
+            call getVelocityGradients_selector(Qn, Uxn, Uyn, Uzn, Vx, Vy, Vz)
+
+            val =   POW2( Vy(IZ) - Vz(IY) ) &
+                  + POW2( Vz(IX) - Vx(IZ) ) &
+                  + POW2( Vx(IY) - Vy(IX) )
 
          case ( VELOCITY )
             val = sqrt( POW2(Qn(IRHOU)) + POW2(Qn(IRHOV)) + POW2(Qn(IRHOW)) ) / Qn(IRHO)
