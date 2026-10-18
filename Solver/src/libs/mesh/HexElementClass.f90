@@ -37,7 +37,7 @@
       public   Element
       public   HexElement_ComputeLocalGradient, HexElement_ProlongSolToFaces, &
                HexElement_ProlongGradientsToFaces, HexElement_ProlongGradientsToFaces_GL, &
-               HexElement_ProlongSolToFaces_GL
+               HexElement_ProlongSolToFaces_GL, HexElement_ProlongAviscToFaces
 
       public   PrintElement, SetElementBoundaryNames, SurfInfo_t
 
@@ -772,6 +772,134 @@
          call fT   % AdaptAviscFluxToFace(nEqn, N(1), N(2), VT   , self % faceSide(ETOP   ))
 
       end subroutine HexElement_ProlongAviscFluxToFaces
+!
+!     Device version of HexElement_ProlongAviscFluxToFaces, for one face of the element
+!     (side = 1..6, as in HexElement_ProlongSolToFaces). The face takes the contravariant
+!     component normal to it, with a minus sign on the FRONT, BOTTOM and LEFT faces. The
+!     sums start from zero and run in the same order as in the host routine, so the
+!     values are the same. Q_aux is used as scratch, as for the solution.
+!
+      subroutine HexElement_ProlongAviscToFaces(self, nEqn, f_side, AVflux, side)
+         !$acc routine vector
+         use FaceClass
+         implicit none
+         type(Element),    intent(in)     :: self
+         integer,          intent(in)     :: nEqn
+         type(Face),       intent(inout)  :: f_side
+         real(kind=RP),    intent(in)     :: AVflux(1:NCONS, 0:self % Nxyz(1), 0:self % Nxyz(2), 0:self % Nxyz(3), 1:NDIM)
+         integer,          intent(in)     :: side
+!
+!        ---------------
+!        Local variables
+!        ---------------
+!
+         integer  :: i, j, k, eq
+         real(kind=RP), dimension(1:NCONS) :: AVlocal
+!
+!        *****************************************
+!        Prolong artificial viscous flux to faces
+!        *****************************************
+!
+         select case(side)
+         case(1)
+
+            !$acc loop vector collapse(2) private(AVlocal)
+            do k = 0, self % Nxyz(3) ; do i = 0, self % Nxyz(1)
+               AVlocal(1:nEqn) = 0.0_RP
+               !$acc loop seq
+               do j = 0, self % Nxyz(2)
+                  !$acc loop seq
+                  do eq = 1, nEqn
+                     AVlocal(eq) = AVlocal(eq) - AVflux(eq,i,j,k,IY) * NodalStorage(self % Nxyz(2)) % v(j,FRONT)
+                  enddo
+               end do
+               f_side % storage(self % faceSide(EFRONT)) % Q_aux(1:nEqn,i,k) = AVlocal(1:nEqn)
+            end do ; end do
+            call Face_AdaptAviscToFace(f_side, nEqn, self % Nxyz(1), self % Nxyz(3), f_side % storage(self % faceSide(EFRONT)) % Q_aux, self % faceSide(EFRONT))
+
+         case(2)
+
+            !$acc loop vector collapse(2) private(AVlocal)
+            do k = 0, self % Nxyz(3) ; do i = 0, self % Nxyz(1)
+               AVlocal(1:nEqn) = 0.0_RP
+               !$acc loop seq
+               do j = 0, self % Nxyz(2)
+                  !$acc loop seq
+                  do eq = 1, nEqn
+                     AVlocal(eq) = AVlocal(eq) + AVflux(eq,i,j,k,IY) * NodalStorage(self % Nxyz(2)) % v(j,BACK)
+                  enddo
+               end do
+               f_side % storage(self % faceSide(EBACK)) % Q_aux(1:nEqn,i,k) = AVlocal(1:nEqn)
+            end do ; end do
+            call Face_AdaptAviscToFace(f_side, nEqn, self % Nxyz(1), self % Nxyz(3), f_side % storage(self % faceSide(EBACK)) % Q_aux, self % faceSide(EBACK))
+
+         case(3)
+
+            !$acc loop vector collapse(2) private(AVlocal)
+            do j = 0, self % Nxyz(2) ; do i = 0, self % Nxyz(1)
+               AVlocal(1:nEqn) = 0.0_RP
+               !$acc loop seq
+               do k = 0, self % Nxyz(3)
+                  !$acc loop seq
+                  do eq = 1, nEqn
+                     AVlocal(eq) = AVlocal(eq) - AVflux(eq,i,j,k,IZ) * NodalStorage(self % Nxyz(3)) % v(k,BOTTOM)
+                  enddo
+               end do
+               f_side % storage(self % faceSide(EBOTTOM)) % Q_aux(1:nEqn,i,j) = AVlocal(1:nEqn)
+            end do ; end do
+            call Face_AdaptAviscToFace(f_side, nEqn, self % Nxyz(1), self % Nxyz(2), f_side % storage(self % faceSide(EBOTTOM)) % Q_aux, self % faceSide(EBOTTOM))
+
+         case(4)
+
+            !$acc loop vector collapse(2) private(AVlocal)
+            do k = 0, self % Nxyz(3) ; do j = 0, self % Nxyz(2)
+               AVlocal(1:nEqn) = 0.0_RP
+               !$acc loop seq
+               do i = 0, self % Nxyz(1)
+                  !$acc loop seq
+                  do eq = 1, nEqn
+                     AVlocal(eq) = AVlocal(eq) + AVflux(eq,i,j,k,IX) * NodalStorage(self % Nxyz(1)) % v(i,RIGHT)
+                  enddo
+               end do
+               f_side % storage(self % faceSide(ERIGHT)) % Q_aux(1:nEqn,j,k) = AVlocal(1:nEqn)
+            end do ; end do
+            call Face_AdaptAviscToFace(f_side, nEqn, self % Nxyz(2), self % Nxyz(3), f_side % storage(self % faceSide(ERIGHT)) % Q_aux, self % faceSide(ERIGHT))
+
+         case(5)
+
+            !$acc loop vector collapse(2) private(AVlocal)
+            do j = 0, self % Nxyz(2) ; do i = 0, self % Nxyz(1)
+               AVlocal(1:nEqn) = 0.0_RP
+               !$acc loop seq
+               do k = 0, self % Nxyz(3)
+                  !$acc loop seq
+                  do eq = 1, nEqn
+                     AVlocal(eq) = AVlocal(eq) + AVflux(eq,i,j,k,IZ) * NodalStorage(self % Nxyz(3)) % v(k,TOP)
+                  enddo
+               end do
+               f_side % storage(self % faceSide(ETOP)) % Q_aux(1:nEqn,i,j) = AVlocal(1:nEqn)
+            end do ; end do
+            call Face_AdaptAviscToFace(f_side, nEqn, self % Nxyz(1), self % Nxyz(2), f_side % storage(self % faceSide(ETOP)) % Q_aux, self % faceSide(ETOP))
+
+         case(6)
+
+            !$acc loop vector collapse(2) private(AVlocal)
+            do k = 0, self % Nxyz(3) ; do j = 0, self % Nxyz(2)
+               AVlocal(1:nEqn) = 0.0_RP
+               !$acc loop seq
+               do i = 0, self % Nxyz(1)
+                  !$acc loop seq
+                  do eq = 1, nEqn
+                     AVlocal(eq) = AVlocal(eq) - AVflux(eq,i,j,k,IX) * NodalStorage(self % Nxyz(1)) % v(i,LEFT)
+                  enddo
+               end do
+               f_side % storage(self % faceSide(ELEFT)) % Q_aux(1:nEqn,j,k) = AVlocal(1:nEqn)
+            end do ; end do
+            call Face_AdaptAviscToFace(f_side, nEqn, self % Nxyz(2), self % Nxyz(3), f_side % storage(self % faceSide(ELEFT)) % Q_aux, self % faceSide(ELEFT))
+
+         end select
+
+      end subroutine HexElement_ProlongAviscToFaces
 
 !
 !////////////////////////////////////////////////////////////////////////

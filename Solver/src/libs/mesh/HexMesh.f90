@@ -1313,6 +1313,12 @@ slavecoord:             DO l = 1, 4
             call self % MPIfaces % faces(domain) % RecvAviscFlux(domain, nEqn)
          end do
 !
+!        The flux is prolonged to the faces on the device (SC_ProlongAviscFluxToFaces,
+!        queue 1) and packed here on the host: wait for it, and bring this side of
+!        each MPI face back below. No-op on CPU builds.
+!        ------------------------------------------------------------------------------
+         !$acc wait(1)
+!
 !        ***********
 !        Send H flux
 !        ***********
@@ -1329,6 +1335,7 @@ slavecoord:             DO l = 1, 4
             do mpifID = 1, self % MPIfaces % faces(domain) % no_of_faces
                fID = self % MPIfaces % faces(domain) % faceIDs(mpifID)
                thisSide = self % MPIfaces % faces(domain) % elementSide(mpifID)
+               !$acc update self(self % faces(fID) % storage(thisSide) % AviscFlux)
                associate(f => self % faces(fID))
                do j = 0, f % Nf(2)  ; do i = 0, f % Nf(1)
                   self % MPIfaces % faces(domain) % AviscFluxSend(counter:counter+nEqn-1) = &
@@ -1572,8 +1579,7 @@ slavecoord:             DO l = 1, 4
                end associate
 !
 !              The neighbour's flux was unpacked on the host, but computeMPIFaceFlux
-!              runs on the device: without this the device keeps the value pushed
-!              by TimeDerivative_ComputeArtificialViscosity, i.e. the neighbour's
+!              runs on the device: without this the device keeps the neighbour's
 !              flux from the previous stage. No-op on CPU builds.
 !              ----------------------------------------------------------------
                !$acc update device(self % faces(fID) % storage(otherSide(thisSide)) % AviscFlux)

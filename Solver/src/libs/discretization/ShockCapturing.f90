@@ -7,7 +7,7 @@ module ShockCapturing
    use Utilities,                  only: toLower
    use DGSEMClass,                 only: ComputeTimeDerivative_f, DGSem
    use HexMeshClass,               only: HexMesh
-   use ElementClass,               only: Element
+   use ElementClass,               only: Element, HexElement_ProlongAviscToFaces
 #if !defined(SPALARTALMARAS)
    use LESModels,                  only: Smagorinsky_t, Smagorinsky_ComputeViscosity
 #endif
@@ -1001,8 +1001,9 @@ module ShockCapturing
 !     ---------------------------------------------------------------------
 !     SCDEV_DISPATCH (SVV) -- bring the SVV dissipation of every element back
 !     to e % storage % artificialDiss, which the volume monitors read on the
-!     host. One contiguous transfer. Nothing to do for the other methods,
-!     whose device path does not compute it.
+!     host. One contiguous transfer, after waiting for the element kernel
+!     (queue 1). Nothing to do for the other methods, whose device path does
+!     not compute it.
 !     ---------------------------------------------------------------------
 !
       implicit none
@@ -1011,6 +1012,7 @@ module ShockCapturing
 
       if (.not. SCdev_isSVV(1)) return
 
+      !$acc wait(1)
       !$acc update self(SVVdev_diss)
       do eID = 1, size(mesh % elements)
          mesh % elements(eID) % storage % artificialDiss = SVVdev_diss(eID)
@@ -1026,30 +1028,28 @@ module ShockCapturing
 !     SCDEV_DISPATCH -- send each element's artificial viscous flux to its six
 !     faces, so the interface terms can average the two sides.
 !
-!     TODO(device): this is still a HOST loop. The interpolation it delegates
-!     to (Face_AdaptAviscFluxToFace) reads the Tset projection matrices, which
-!     are not in the device data region, so it cannot be given an
-!     "!$acc routine" as it stands. Everything upstream of it
-!     (SC_ComputeElementAviscFlux) is already device-ready, so porting this is
-!     the one remaining step for a fully resident artificial viscosity --
-!     mirror HexElement_ProlongSolToFaces / _GL, which solve exactly this
-!     problem for the solution.
+!     Device-resident, with the same loop as HexMesh_ProlongSolToFaces: one
+!     iteration per (element, face) pair, each writing its own side of the
+!     face (HexElement_ProlongAviscToFaces -> Face_AdaptAviscToFace). Like the
+!     solution and the gradients, it handles rotated faces but not
+!     p-nonconforming ones: the Tset projections are not on the device.
 !
-!     Until then the AviscContravariantFlux must be on the host when this
-!     runs, and the face AviscFlux must be pushed back to the device after.
+!     The host routine (HexElement_ProlongAviscFluxToFaces, with projections)
+!     is still what SC_viscosity calls, i.e. the isolated time derivative.
 !     ---------------------------------------------------------------------
 !
       implicit none
       type(HexMesh), intent(inout) :: mesh
-      integer :: eID, fIDs(6)
+      integer :: eID, fID
 
+!$acc parallel loop gang collapse(2) present(mesh) num_gangs(size(mesh % elements)) vector_length(32) async(1)
       do eID = 1, size(mesh % elements)
-         fIDs = mesh % elements(eID) % faceIDs
-         call mesh % elements(eID) % ProlongAviscFluxToFaces(NCONS,                           &
-                        mesh % elements(eID) % storage % AviscContravariantFlux,              &
-                        mesh % faces(fIDs(1)), mesh % faces(fIDs(2)), mesh % faces(fIDs(3)),  &
-                        mesh % faces(fIDs(4)), mesh % faces(fIDs(5)), mesh % faces(fIDs(6)))
-      end do
+         do fID = 1, 6
+            call HexElement_ProlongAviscToFaces(mesh % elements(eID), NCONS,                        &
+                                                mesh % faces(mesh % elements(eID) % faceIDs(fID)),  &
+                                                mesh % elements(eID) % storage % AviscContravariantFlux, fID)
+      end do ; end do
+!$acc end parallel loop
 
    end subroutine SC_ProlongAviscFluxToFaces
 !
