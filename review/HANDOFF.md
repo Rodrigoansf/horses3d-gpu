@@ -32,7 +32,11 @@ git -C horses3d-gpu checkout claude/eager-lamport-ymhyjk   # review docs live he
 
 Pushing uses SSH (`git@github.com:Rodrigoansf/...`) with the user's `~/.ssh/Rod` key, set per clone with `git config core.sshCommand "ssh -i ~/.ssh/Rod -o IdentitiesOnly=yes"`. The `upstream` push URL is set to `DISABLED-never-push-to-horses-framework` on purpose.
 
-## Where things stand (17 Oct 2026)
+## Where things stand (18 Oct 2026)
+
+Newest: fork PR #1 is split into #9–#12, `GMM_develop` → `develop` is #13, and `goal/end-goal` merges everything (see `STATUS.md` §0). The local plan, design loop and test log are in `gpu-wt/PLAN.md` on the laptop.
+
+### 17 Oct
 
 Done: the commit-attribution rewrite (15 Oct), the team decision on targets, all branches rebased and tested on the laptop GPU. **Read `review/STATUS.md` section 0 for the branch table.** In short:
 
@@ -49,12 +53,12 @@ The user's rule now: **no PRs in horses-framework until they have reviewed every
 - Multi-GPU / MPI runs on the cluster (`CI_parallel_GPU.yml`), for the develop PRs and `GMM_develop`.
 - Delete the superseded branches; they still carry commits authored or committed by Claude (`fix/gpu-port-develop`, `fix/gpu-port-GMM`, `discuss/legacy-shared-bugs`, `legacy/sc-sensor-omp-shared`, `legacy/te-sensor-padapt-mpi`). This review branch also has `Claude-Session:` trailers in 12 commits; ask before rewriting it. Branches to delete (`stack-pick/*`, `fix/gpu-port-develop`, `fix/gpu-port-GMM`, `discuss/legacy-shared-bugs`, `review/gpu-results` in the GPU fork; `legacy/te-sensor-padapt-mpi`, `legacy/sc-sensor-omp-shared` in the legacy fork). Do **not** touch `miguel_*`, `arr/*` and `feature/*`.
 - Known, not being fixed here: see STATUS.md section 0 (new findings) and the list below.
-  - Anisotropic orders crash on GPU in `HexMesh_ProlongSolToFaces`.
+  - ~~Anisotropic orders crash on GPU~~: fixed in fork PR #9 (NodalStorage copied to the device in full).
   - `Face_AdaptSolToFace` lost legacy's p-nonconforming interpolation.
   - GPU volume monitors are stale (kinetic-energy rate reads 0 on the GPU).
   - `TruncationErrorClass` has `private(S)` with `S` zeroed outside the OpenMP loop.
   - TaylorGreenSVVLES's volume-monitor asserts have tolerances larger than the values they check (the SVV-dissipation reference is 7.8e-8; CPU and GPU both give 2.6e-8).
-  - `ForwardFacingStepSVV` crashes on the GPU on `GMM_develop`.
+  - ~~`ForwardFacingStepSVV` crashes on the GPU on `GMM_develop`~~: same bug (2D mesh = order 0 in one direction), fixed in #9.
   - Artificial-viscosity face prolongation on `GMM_develop` is still a host round trip (`SC_ProlongAviscFluxToFaces`).
 
 ## Laptop limits (important)

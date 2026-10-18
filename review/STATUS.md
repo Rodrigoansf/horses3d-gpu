@@ -1,6 +1,6 @@
 # Stack PRs #113–#117: where things stand
 
-## 0. Current branches (17 Oct 2026)
+## 0. Current branches (18 Oct 2026)
 
 Team decision (15 Oct): the review changes go in split by feature, to `develop` (horses3d-gpu) and `master` (legacy). `GMM_develop` is Rodrigo's research branch: it gets the fixes directly (no PR) and is kept merged up to `develop`. **No PRs in horses-framework yet**: fork PRs only, until everything is reviewed and tested. The 13 Oct table and everything below section 0 are history.
 
@@ -8,14 +8,21 @@ Team decision (15 Oct): the review changes go in split by feature, to `develop` 
 
 | Fork PR | Branch | What |
 |---|---|---|
-| #1 | `fix/minor-develop` | 11 commits: Face_Assign, NodalStorage mapping, enter/exit data balance, `sem` teardown, TE sensor `pAdapt_MPI`, sensor OpenMP `shared` lists, ActuatorLine guard, 3 OpenMP fixes, multiphase "source" monitor |
+| #9 | `feat/gpu-device-data` | every polynomial order on the GPU (NodalStorage mapped in full: fixes every multi-order case, incl. 2D meshes such as ForwardFacingStepSVV), enter/exit data balance, `sem` teardown |
+| #10 | `feat/te-sensor-runs` | Face_Assign deep copy, TE sensor `pAdapt_MPI`, sensor OpenMP `shared` lists |
+| #11 | `feat/openmp-races` | monitor-integral and boundary-loop OpenMP races |
+| #12 | `feat/actuator-line` | ActuatorLine serial guard, threaded build, multiphase "source" monitor |
+| #13 | `feat/gmm-shock-capturing` | `GMM_develop` → `develop`: shock capturing and gradient variables on the device, GMM sensor, SVV on the GPU |
 | #3 | `change/strong-form-split-fluxes` | split-form sharp fluxes never computed (strong-form volume term, aliasing sensor) |
 | #4 | `change/svv-energy-divv` | SVV `divV` + TaylorGreenSVVLES references (no effect on develop yet: SC isn't applied there); base now develop |
 | #5 | `change/te-sensor-source-term` | TE sensor source term; base now develop |
 | #6 | `change/limiter-pressure-reference` | limiter uses p(q_avg) |
 | #7 | `fix/aliasing-sensor-realloc` | aliasing sensor scratch-array realloc |
 | #8 | `fix/paramfile-scalar-dealloc` | ParamfileRegions: avoid the nvfortran 26.3 crash that breaks `Cylinder` on the GPU since horses-framework/horses3d-gpu#119 |
+| #1 | `fix/minor-develop` | closed (18 Oct): split into #9–#12 |
 | #2 | `fix/minor-GMM` | closed: its commits are in GMM_develop |
+
+`goal/end-goal` (fork, test branch, not for merging as is): `develop` + all of the above merged. On the GPU every CI case runs, `ForwardFacingStepSVV` 6/6, `CylinderGMM` 5/5, `TaylorGreenSVVLES` 8/8. Local test log and plan: `gpu-wt/PLAN.md`.
 
 **horses-framework GMM_develop** (pushed directly, fast-forward from `630879e6`): the five `fix/minor-GMM` commits, SVV divV + references, TE source term, **SVV on the GPU** (device port), merge of develop, split-form (2), aliasing realloc, ParamfileRegions. See `pr-drafts/gpu/2-GMM_develop-direct.md`.
 
@@ -27,7 +34,7 @@ New findings, not fixed (beyond the old list in HANDOFF.md):
 - nvfortran 26.3 segfaults when deallocating an allocatable scalar component through an allocatable dummy (fixed for ParamfileRegions only).
 - gfortran wraps any procedure with a procedure-level `USE` of a module that reaches IEEE_ARITHMETIC in an FP-environment save/restore (~100 ns per call). Avoided in the new SVV device routines; `SC_ComputeElementAviscFlux` still has one (per element, negligible).
 - Legacy `NavierStokes/CylinderGMM` is not reproducible run to run: one of three runs of the PR build differed, the other two matched master (master gave three identical runs); asserts always pass.
-- `ForwardFacingStepSVV` crashes on the GPU on GMM_develop (illegal address in `HexMesh_ComputeLocalGradientNS`).
+- ~~`ForwardFacingStepSVV` crashes on the GPU on GMM_develop~~: fixed in #9. Its 2D mesh has order 0 in the offset direction, and NodalStorage was copied to the device one element at a time, so the GPU could index only one polynomial order.
 - On GMM_develop, `SC_viscosity` (host) and `SC_ComputeElementAviscFlux` (device) disagree on whether the first method acts where sensor >= 1 when there is no second method.
 
 ## 1. Blatant bugs, fixed: no team discussion needed
