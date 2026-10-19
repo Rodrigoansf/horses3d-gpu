@@ -1,32 +1,5 @@
-## Aliasing sensor: don't free the scratch arrays when the next element has the same order
+## Fix the aliasing sensor crash with a uniform polynomial order
 
-This is the GPU twin of the legacy PR of the same name, which explains it step by step. In short, `Sensor_aliasing` keeps its scratch arrays (`F`, `Fs`, `Gs`, `Hs`, `aliasing`) from one element to the next and is meant to reallocate them only when the polynomial order changes. When the order *doesn't* change, it set `need_alloc = .false.` but left `need_dealloc = .true.`. So it freed the arrays and never allocated them again. The next call, `ComputeInnerFluxes(e, EulerFlux, F)`, then got an unallocated `F` and segfaulted.
+`Sensor_aliasing` is meant to reallocate its scratch arrays only when the polynomial order changes, but `need_dealloc` stayed `.true.` when the shape matched, so the arrays were deallocated and never allocated again. The sensor then segfaulted on the second element, so `Shock sensor = aliasing error` could not be used with a uniform order.
 
-The fix adds one line:
-
-```fortran
-   if (all(ubound(F) == [NCONS, e % Nxyz(1), e % Nxyz(2), e % Nxyz(3), NDIM])) then
-      need_alloc = .false.
-      need_dealloc = .false.
-   end if
-```
-
-With a uniform order, the sensor crashed on its second element, so `Shock sensor = aliasing error` could not be used at all.
-
-### Related PR
-
-The aliasing sensor has a second, GPU-only problem: the call that fills `Fs/Gs/Hs` was commented out in the port. That is fixed in the "split form: compute the sharp fluxes again" PR. The two touch different lines and can be merged in any order. The sensor gives meaningful values only once both are in.
-
-### How it was checked
-
-CPU (gfortran 13, serial), on the same small case as the legacy PR: the TaylorGreenSVVLES setup with the split form, `Shock sensor = aliasing error`, P=4 and 3 steps.
-
-| build | result | sensor at steps 1–3 |
-|---|---|---|
-| split-form PR branch, without this fix | segfault in `ComputeInnerFluxes` before the first step completes | – |
-| this branch alone | runs to the end | 1.0 in every element (reads the uninitialised `Fs/Gs/Hs`) |
-| this branch + the split-form PR | runs to the end | 0.0 in every element, **same as legacy with its fix** |
-
-GPU (RTX 3060 laptop): the sensor itself runs on the host, but the GPU build crashed the same way. On `develop`, `te-alias.control` segfaults before the first step completes. With this branch alone it runs to the end, and the 18 GPU test cases (the CI list plus `TaylorGreenSVVLES`) are bitwise identical to `develop`. Alone, the sensor still reads the never-filled `Fs/Gs/Hs`: that memory happened to give 0.0 on the GPU and 1.0 on the CPU, so the values only mean something together with the split-form PR. With all review PRs stacked, `te-alias.control` runs to the end on the GPU, the sensor is 0.0 in every element as on the CPU and in legacy, and the monitors agree with the CPU build to round-off.
-
-`GMM_develop` has the same code and already has this fix (committed there directly, with develop merged in).
+No test uses this sensor. Legacy has the same bug (fixed in its own PR).
