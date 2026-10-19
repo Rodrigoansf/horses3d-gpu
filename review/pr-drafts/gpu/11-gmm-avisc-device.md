@@ -33,6 +33,6 @@ GPU (RTX 3060 laptop, nvfortran 26.3, one GPU), on `goal/end-goal` with and with
 
 (wall time, including set-up). The other 18 GPU cases (no shock capturing) are bitwise identical.
 
-CPU (gfortran): CPU_PLACEHOLDER
+CPU (gfortran): serial builds of `goal/end-goal` with and without these commits: `CylinderGMM`, `TaylorGreenSVVLES`, `ForwardFacingStepSVV`, `Cylinder` and `CylinderDifferentOrders` (rotated faces) are bitwise identical. Threaded builds (`ENABLE_THREADS=YES`), 4 threads: shock-capturing runs were wrong before (every case failed its assertions and changed from run to run). Most of that was not this code but the split-form volume loop, which had no `!$omp do` either; that fix is in the OpenMP PR. With both, `CylinderGMM` and `ForwardFacingStepSVV` with 4 threads are bitwise identical to 1 thread and from run to run, and `TaylorGreenSVVLES` passes 8/8 (its near-zero kinetic-energy-rate monitor differs at 1e-16, the order of a sum).
 
 **Not checked:** multi-GPU and MPI (the exchange path changed: one `update self` per MPI face of its local side). The cluster CI should be run before merging.
