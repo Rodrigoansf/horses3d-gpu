@@ -6,4 +6,4 @@ The truncation-error shock sensor could not run on `develop`: on the GPU it stop
 * The coarse mesh is built with `pAdapt_MPI` in MPI runs, as the RL p-adaptation does.
 * Missing variables in the `shared` lists of the two `default(private)` loops in `SCsensorClass`.
 
-No results change, and the truncation-error cases now run on the GPU. Legacy has the last two bugs too (fixed in its own PR).
+No results change, and the truncation-error cases now run on the GPU. Legacy has the last two bugs too (fixed in horses-framework/horses3d#381).

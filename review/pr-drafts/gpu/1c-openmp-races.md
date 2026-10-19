@@ -6,4 +6,4 @@ This PR fixes several races in CPU builds with `ENABLE_THREADS=YES`. nvfortran b
 * `computeBoundaryFlux` is called by every thread and its face loops had no `!$omp do`, so every thread computed every boundary face. The loops are now shared, as in legacy (#113 put the whole call under `!$omp single` instead).
 * The same problem in `TimeDerivative_VolumetricContribution_Split`: the threads overwrote each other's `QDot`, so every split-form case was wrong with threads (`CylinderKennedyGruberLaxFriedrichs` passed 8/8 with 1 thread and failed 8/8 with 4).
 
-With 4 threads, `Cylinder` and the split-form cylinder cases now give the same residuals as the serial build. Note that `develop` only compiles with `ENABLE_THREADS=YES` after the actuator-line PR.
+With 4 threads, `Cylinder` and the split-form cylinder cases now give the same residuals as the serial build. Note that `develop` only compiles with `ENABLE_THREADS=YES` after horses-framework/horses3d-gpu#143.
