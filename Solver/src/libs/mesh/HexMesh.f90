@@ -4596,7 +4596,7 @@ slavecoord:             DO l = 1, 4
 !     Copying one element at a time leaves the device pointer NodalStorage attached to a
 !     single element, so kernels could only index one order.
       !$acc enter data copyin(NodalStorage)
-      DO i = 0, ubound(NodalStorage,1)
+      DO i = lbound(NodalStorage,1), ubound(NodalStorage,1)
          if (.not. NodalStorage(i) % Constructed) cycle
          !$acc enter data copyin(NodalStorage(i) % hatD)
          if (allocated(NodalStorage(i) % sharpD)) then
@@ -4715,9 +4715,9 @@ slavecoord:             DO l = 1, 4
          !$acc exit data delete(self % faces(iFace) % storage(1) % unStar)
          !$acc exit data delete(self % faces(iFace) % storage(2) % fStar)
          !$acc exit data delete(self % faces(iFace) % storage(2) % unStar)
-         !$acc exit data delete(self % faces(iFace) % storage)
          !$acc exit data delete(self % faces(iFace) % storage(1) % rho)
          !$acc exit data delete(self % faces(iFace) % storage(2) % rho)
+         !$acc exit data delete(self % faces(iFace) % storage)
          !$acc exit data delete(self % faces(iFace) % geom % x)
          !$acc exit data delete(self % faces(iFace) % geom % h)
          !$acc exit data delete(self % faces(iFace) % geom % normal)
@@ -4767,7 +4767,7 @@ slavecoord:             DO l = 1, 4
          !$acc exit data delete (self % zones(zoneID))
       enddo
 
-      DO i = 0, ubound(NodalStorage,1)
+      DO i = lbound(NodalStorage,1), ubound(NodalStorage,1)
          if (.not. NodalStorage(i) % Constructed) cycle
          !$acc exit data delete (NodalStorage(i) % hatD)
          if (allocated(NodalStorage(i) % sharpD)) then
