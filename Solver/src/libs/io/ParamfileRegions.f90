@@ -134,18 +134,16 @@ module ParamfileRegions
 
          auxstr = trim(adjustl(auxstr))
          
-!
-!        Read into a local and only allocate var when there is a value.
-!        Allocating var and then deallocating it here (when the key is
-!        missing) segfaults with nvfortran 26.3 if var is a component of a
-!        derived type, e.g. surface monitors without "reference surface".
-!
+!        Read into a local: allocating var and then deallocating it when the key is missing segfaults with nvfortran 26.3
          read(auxstr,*,iostat=io) val
          if (io .lt. 0) then
             if (allocated(var)) deallocate(var)
-         else
+         else if (io .eq. 0) then
             if (.not. allocated(var)) allocate(var)
             var = val
+         else
+            print*, 'Could not read the integer value of "', trim(label), '" in ', trim(fileName)
+            error stop "Stopped."
          end if
  
 
@@ -166,18 +164,16 @@ module ParamfileRegions
 
          auxstr = trim(adjustl(auxstr))
          
-!
-!        Read into a local and only allocate var when there is a value.
-!        Allocating var and then deallocating it here (when the key is
-!        missing) segfaults with nvfortran 26.3 if var is a component of a
-!        derived type, e.g. surface monitors without "reference surface".
-!
+!        Read into a local: allocating var and then deallocating it when the key is missing segfaults with nvfortran 26.3
          read(auxstr,*,iostat=io) val
          if (io .lt. 0) then
             if (allocated(var)) deallocate(var)
-         else
+         else if (io .eq. 0) then
             if (.not. allocated(var)) allocate(var)
             var = val
+         else
+            print*, 'Could not read the real value of "', trim(label), '" in ', trim(fileName)
+            error stop "Stopped."
          end if
       
       end subroutine readRealValueInRegion
@@ -197,18 +193,16 @@ module ParamfileRegions
 
          auxstr = trim(adjustl(auxstr))
 
-!
-!        Read into a local and only allocate var when there is a value.
-!        Allocating var and then deallocating it here (when the key is
-!        missing) segfaults with nvfortran 26.3 if var is a component of a
-!        derived type, e.g. surface monitors without "reference surface".
-!
+!        Read into a local: allocating var and then deallocating it when the key is missing segfaults with nvfortran 26.3
          read(auxstr,*,iostat=io) val
          if (io .lt. 0) then
             if (allocated(var)) deallocate(var)
-         else
+         else if (io .eq. 0) then
             if (.not. allocated(var)) allocate(var)
             var = val
+         else
+            print*, 'Could not read the logical value of "', trim(label), '" in ', trim(fileName)
+            error stop "Stopped."
          end if
 
       end subroutine readLogicalValueInRegion
