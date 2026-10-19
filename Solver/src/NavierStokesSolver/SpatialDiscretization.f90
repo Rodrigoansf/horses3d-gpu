@@ -1478,6 +1478,7 @@ module SpatialDiscretization
          integer       :: i, j, k,l,eq, eID
          real(kind=RP) :: Flux(1:NCONS, 1:NDIM)
 
+!$omp do schedule(runtime)
          !$acc parallel present(mesh) vector_length(128) num_gangs(9750) async(1)
          !$acc loop gang
          do eID = 1 , size(mesh % elements)
@@ -1539,6 +1540,7 @@ module SpatialDiscretization
 
          enddo
          !$acc end parallel loop
+!$omp end do
 
       end subroutine TimeDerivative_VolumetricContribution_Split
 !
