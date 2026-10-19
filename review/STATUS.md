@@ -26,6 +26,8 @@ Team decision (15 Oct): the review changes go in split by feature, to `develop` 
 
 **horses-framework GMM_develop** (pushed directly, fast-forward from `630879e6`): the five `fix/minor-GMM` commits, SVV divV + references, TE source term, **SVV on the GPU** (device port), merge of develop, split-form (2), aliasing realloc, ParamfileRegions. See `pr-drafts/gpu/2-GMM_develop-direct.md`.
 
+**legacy horses3d upstream (19 Oct):** horses-framework/horses3d #381 (TE sensor MPI/OpenMP), #382 (TE source term), #383 (SVV divV), #384 (limiter), #385 (aliasing sensor), branches `bug-fix-*`, mirroring the fork PRs below.
+
 **legacy horses3d**, fork Rodrigoansf/horses3d, all on `upstream-master` = upstream master `a01ca08b4`: `legacy/minor-fixes` (#1), `legacy/te-sensor-source-term` (#2), `legacy/svv-energy-divv` (#3), `legacy/limiter-pressure-reference` (#4), `legacy/aliasing-sensor-realloc` (#5).
 
 Testing (laptop RTX 3060, nvfortran 26.3; gfortran for CPU): see each PR draft. Summary: every develop branch and GMM_develop run the GPU CI cases; anything that should not change results is bitwise identical to its base. Leak check, TE/aliasing scratch cases, CPU/GPU cross-checks and the legacy serial CI (NS + multiphase) are in the drafts.
