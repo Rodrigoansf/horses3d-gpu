@@ -1200,7 +1200,7 @@ MODULE ExplicitMethods
 
          ! Pass 2. Reference is p(qavg), not the mean nodal pressure: p is concave in Q,
          ! so this theta keeps every node >= m = min(LIMITER_MIN, p(qavg)) (Zhang & Shu, 2010)
-         pavg = gm1 * (qavg(5) - 0.5_RP * sum(qavg(2:4)**2) / qavg(1))
+         pavg = gm1 * (qavg(5) - 0.5_RP * (qavg(2)*qavg(2) + qavg(3)*qavg(3) + qavg(4)*qavg(4)) / qavg(1))
          minp = huge(1.0_RP)
 
          if (do_rho_limit) then
