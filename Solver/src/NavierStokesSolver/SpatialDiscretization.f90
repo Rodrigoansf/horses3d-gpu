@@ -1378,6 +1378,7 @@ module SpatialDiscretization
          integer       :: i, j, k,l,eq, eID
          real(kind=RP) :: Flux(1:NCONS, 1:NDIM)
 
+!        Orphaned omp do: this runs inside the !$omp parallel region of ComputeTimeDerivative
 !$omp do schedule(runtime)
          !$acc parallel present(mesh) vector_length(128) num_gangs(9750) async(1)
          !$acc loop gang
