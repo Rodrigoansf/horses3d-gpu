@@ -19,7 +19,7 @@ Don't push to horses-framework or post anything on GitHub until I say so. Builds
 ```
 You're picking up the GMM_develop -> develop work (fork PR #13). Read horses3d-gpu/review/HANDOFF.md (the rules and the "Two chats" section), then horses3d-gpu/review/HANDOFF-gmm.md and gpu-wt/PLAN.md.
 
-First, the ForwardFacingStepSVV CPU failure. Confirm the gfortran select-type miscompile cheaply (gfortran-13, or -O2 for ShockCapturing.f90), then fix it without the select type, and make the device region choice match legacy.
+First, the ForwardFacingStepSVV CPU failure. Confirm the gfortran select-type miscompile cheaply with a gfortran-13 build (HANDOFF-gmm §1 says how), then fix it without the select type, and make the device region choice match legacy.
 
 Then simplify the GMM changes, comments included. Use /simplify with at most 2 agents at a time. Legacy is our objective unless we find it to be wrong: we match legacy by default and only change when there is a reason.
 
