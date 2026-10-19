@@ -26,7 +26,7 @@ Team decision (15 Oct): the review changes go in split by feature, to `develop` 
 
 **horses-framework GMM_develop** (pushed directly, fast-forward from `630879e6`): the five `fix/minor-GMM` commits, SVV divV + references, TE source term, **SVV on the GPU** (device port), merge of develop, split-form (2), aliasing realloc, ParamfileRegions. See `pr-drafts/gpu/2-GMM_develop-direct.md`.
 
-**horses3d-gpu upstream (19 Oct):** horses-framework/horses3d-gpu #134 (split-form sharp fluxes), #135 (SVV divV), #136 (TE source term), #137 (limiter), #138 (aliasing sensor), #139 (ParamfileRegions), branches `bug-fix-*`, mirroring fork #3–#8.
+**horses3d-gpu upstream (19 Oct):** horses-framework/horses3d-gpu #134 (split-form sharp fluxes), #135 (SVV divV), #136 (TE source term), #137 (limiter), #138 (aliasing sensor), #139 (ParamfileRegions); #140 (GPU device data), #141 (TE sensor GPU/MPI/OpenMP), #142 (OpenMP races), #143 (actuator line); branches `bug-fix-*`, mirroring fork #3–#12. Fork #13, #14 and the AV branch: the user works on them first.
 
 **legacy horses3d upstream (19 Oct):** horses-framework/horses3d #381 (TE sensor MPI/OpenMP), #382 (TE source term), #383 (SVV divV), #384 (limiter), #385 (aliasing sensor), branches `bug-fix-*`, mirroring the fork PRs below.
 
