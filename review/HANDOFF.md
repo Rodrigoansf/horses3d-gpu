@@ -8,7 +8,7 @@ The work is split between two Claude chats on the same laptop.
 
 | Chat | Handoff | Owns |
 |---|---|---|
-| PRs | `review/HANDOFF-prs.md` | upstream horses3d-gpu #134–#143 and horses3d #381–#385, their fork twins, fork #14 |
+| PRs | `review/HANDOFF-prs.md` | upstream horses3d-gpu #134–#143 and horses3d #381–#385, their fork twins, fork #14, worktree `gpu-wt/prs-edit` |
 | GMM | `review/HANDOFF-gmm.md` | fork #13 (`feat/gmm-shock-capturing`), `feat/gmm-avisc-device`, `GMM_develop`, `goal/end-goal`, worktrees `gpu-wt/gmm`, `gwork`, `dev-pr` and `cpu-new` |
 
 Both chats share the machine and the git repos:
