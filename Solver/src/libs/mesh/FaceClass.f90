@@ -1051,7 +1051,7 @@
          end if
          if (associated(from % storage)) then
             if (.not. associated(to % storage)) then
-               allocate(to % storage(2))
+               allocate(to % storage(size(from % storage)))
             end if
             to % storage = from % storage
          end if
