@@ -192,7 +192,7 @@ module VolumeMonitorClass
                print*, "Options available are:"
                print*, "   * Entropy rate"
                print*, "   * Entropy balance"
-               print*, "   * Source"
+               print*, "   * source"
                print*, "   * Phase2-Area"
                print*, "   * Phase2-xCoG"
                print*, "   * Phase2-xVel"
