@@ -536,18 +536,12 @@ module ShockCapturing
 !
 !     Pick the region exactly as SC_viscosity does
 !     --------------------------------------------
-      if (switch >= 1.0_RP .and. SCdev_hasMethod(2)) then
-         region = 2
-      elseif (switch > 0.0_RP .and. SCdev_hasMethod(1)) then
-         region = 1
-      else
-         region = 0
+      region = 0
+      if (switch >= 1.0_RP) then
+         if (SCdev_hasMethod(2)) region = 2
+      elseif (switch > 0.0_RP) then
+         if (SCdev_hasMethod(1)) region = 1
       end if
-!
-!     SVV is only allowed in region 1 and, as in SC_viscosity, it is never
-!     applied where switch >= 1 (that is region 2's job)
-!     ---------------------------------------------------------------------
-      if (region == 1 .and. SCdev_isSVV(1) .and. switch >= 1.0_RP) region = 0
 
       if (region /= 0) then
          if (SCdev_isSVV(region)) then
