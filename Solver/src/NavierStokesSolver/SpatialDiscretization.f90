@@ -1375,6 +1375,8 @@ module SpatialDiscretization
          integer       :: i, j, k,l,eq, eID
          real(kind=RP) :: Flux(1:NCONS, 1:NDIM)
 
+!        Orphaned omp do: this runs inside the !$omp parallel region of ComputeTimeDerivative
+!$omp do schedule(runtime)
          !$acc parallel present(mesh) vector_length(128) num_gangs(9750) async(1)
          !$acc loop gang
          do eID = 1 , size(mesh % elements)
@@ -1417,6 +1419,7 @@ module SpatialDiscretization
 
          enddo
          !$acc end parallel loop
+!$omp end do
 
       end subroutine TimeDerivative_VolumetricContribution_Split
 !
@@ -1634,6 +1637,7 @@ module SpatialDiscretization
          
          if (mesh %zones(zoneID) % useWallFunction) then
             
+!$omp do schedule(runtime)
             !$acc parallel loop gang present(mesh) async(1)
             do zonefID = 1, mesh % zones(zoneID) % no_of_faces
                fID =  mesh % zones(zoneID) % faces(zonefID)
@@ -1662,10 +1666,12 @@ module SpatialDiscretization
                end do ; end do
             end do
             !$acc end parallel loop
+!$omp end do
 
             fID_zoneStart = fID_zoneStart + mesh % zones(zoneID) % no_of_faces
 
          else
+!$omp do schedule(runtime)
             !$acc parallel loop gang present(mesh) async(1)
             do zonefID = 1, mesh % zones(zoneID) % no_of_faces
                fID =  mesh % zones(zoneID) % faces(zonefID)
@@ -1691,10 +1697,15 @@ module SpatialDiscretization
                end do ; end do
             end do
             !$acc end parallel loop 
+!$omp end do
          end if
 
+!        FlowNeumann loops over the whole zone itself: run it on one thread
+!$omp single
          CALL BCs(zoneID) % bc % FlowNeumann(mesh, mesh % zones(zoneID))                             
+!$omp end single
          
+!$omp do schedule(runtime)
          !$acc parallel loop gang present(mesh) async(1)
          do zonefID = 1, mesh % zones(zoneID) % no_of_faces
             fID =  mesh % zones(zoneID) % faces(zonefID)
@@ -1727,6 +1738,7 @@ module SpatialDiscretization
             call Face_ProjectFluxToElements(mesh % faces(fID), NCONS, mesh % faces(fID) % storage(1) % FStar, 1)
          enddo
          !$acc end parallel loop 
+!$omp end do
       enddo
       
       !$acc wait
