@@ -337,11 +337,6 @@ module ShockCapturing
 
       SCdev_isActive = self % isActive
 
-      if (self % isActive) then
-         if (allocated(self % method1)) call SC_FlattenMethod(self % method1, 1)
-         if (allocated(self % method2)) call SC_FlattenMethod(self % method2, 2)
-      end if
-
       !$acc update device(SCdev_isActive, SCdev_onDevice)
       !$acc update device(SCdev_hasMethod, SCdev_update, SCdev_fluxType)
       !$acc update device(SCdev_mu1, SCdev_mu2, SCdev_smagC, SCdev_smagWallModel)
@@ -349,63 +344,6 @@ module ShockCapturing
       !$acc update device(SCdev_sqrtAlpha1, SCdev_sqrtAlpha2, SCdev_sqrtMu2Alpha)
 
    end subroutine SC_SyncDeviceConfig
-!
-!///////////////////////////////////////////////////////////////////////////////
-!
-   subroutine SC_FlattenMethod(method, region)
-!
-!     ---------------------------------------------------------------------
-!     SCDEV_DISPATCH -- flatten one method into the region-indexed scalars.
-!
-!     SVV (filtered) also needs its filter matrices; InitializeSVV puts those
-!     on the device (SVVdev_* in SpectralVanishingViscosity). A method that
-!     cannot be flattened keeps using the original host routine (SC_viscosity);
-!     we record that by clearing SCdev_onDevice, which
-!     TimeDerivative_ComputeArtificialViscosity reads to pick a path.
-!     ---------------------------------------------------------------------
-!
-      implicit none
-      class(ArtificialViscosity_t), intent(in) :: method
-      integer,                      intent(in) :: region
-
-      select type (m => method)
-
-      type is (SC_NoSVV_t)
-         SCdev_hasMethod(region) = .true.
-         SCdev_update(region)    = m % updateMethod
-         SCdev_fluxType(region)  = m % fluxType
-         SCdev_mu1(region)       = m % mu1
-         SCdev_mu2(region)       = m % mu2
-#if !defined (SPALARTALMARAS)
-         SCdev_smagC(region)         = m % Smagorinsky % C
-         SCdev_smagWallModel(region) = m % Smagorinsky % WallModel
-#endif
-
-      type is (SC_SVV_t)
-         SCdev_hasMethod(region)   = .true.
-         SCdev_isSVV(region)       = .true.
-         SCdev_update(region)      = m % updateMethod
-         SCdev_sqrtMu1(region)     = m % sqrt_mu1
-         SCdev_sqrtMu2(region)     = m % sqrt_mu2
-         SCdev_alphaPropMu(region) = m % alphaIsPropToMu
-         if (m % alphaIsPropToMu) then
-            SCdev_sqrtMu2Alpha(region) = m % sqrt_mu2alpha
-         else
-            SCdev_sqrtAlpha1(region) = m % sqrt_alpha1
-            SCdev_sqrtAlpha2(region) = m % sqrt_alpha2
-         end if
-#if !defined (SPALARTALMARAS)
-         SCdev_smagC(region)         = m % Smagorinsky % C
-         SCdev_smagWallModel(region) = m % Smagorinsky % WallModel
-#endif
-
-      class default
-         SCdev_hasMethod(region) = .true.
-         SCdev_onDevice          = .false.
-
-      end select
-
-   end subroutine SC_FlattenMethod
 !
 !///////////////////////////////////////////////////////////////////////////////
 !
@@ -1379,6 +1317,18 @@ module ShockCapturing
          end select
 
       end select
+!
+!     Flat copy for the device kernels (pushed by SC_SyncDeviceConfig)
+!     ---------------------------------------------------------------
+      SCdev_hasMethod(region) = .true.
+      SCdev_update(region)    = self % updateMethod
+      SCdev_fluxType(region)  = self % fluxType
+      SCdev_mu1(region)       = self % mu1
+      SCdev_mu2(region)       = self % mu2
+#if !defined (SPALARTALMARAS)
+      SCdev_smagC(region)         = self % Smagorinsky % C
+      SCdev_smagWallModel(region) = self % Smagorinsky % WallModel
+#endif
 
    end subroutine NoSVV_initialize
 !
@@ -1615,6 +1565,25 @@ module ShockCapturing
 !     Start the SVV module
 !     --------------------
       call InitializeSVV(SVV, controlVariables, mesh)
+!
+!     Flat copy for the device kernels (pushed by SC_SyncDeviceConfig)
+!     ---------------------------------------------------------------
+      SCdev_hasMethod(region)   = .true.
+      SCdev_isSVV(region)       = .true.
+      SCdev_update(region)      = self % updateMethod
+      SCdev_sqrtMu1(region)     = self % sqrt_mu1
+      SCdev_sqrtMu2(region)     = self % sqrt_mu2
+      SCdev_alphaPropMu(region) = self % alphaIsPropToMu
+      if (self % alphaIsPropToMu) then
+         SCdev_sqrtMu2Alpha(region) = self % sqrt_mu2alpha
+      else
+         SCdev_sqrtAlpha1(region) = self % sqrt_alpha1
+         SCdev_sqrtAlpha2(region) = self % sqrt_alpha2
+      end if
+#if !defined (SPALARTALMARAS)
+      SCdev_smagC(region)         = self % Smagorinsky % C
+      SCdev_smagWallModel(region) = self % Smagorinsky % WallModel
+#endif
 
    end subroutine SVV_initialize
 !
