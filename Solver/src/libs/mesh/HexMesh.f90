@@ -4428,6 +4428,21 @@ slavecoord:             DO l = 1, 4
          e % storage => self % storage % elements(eID)
          end associate
       END DO
+#ifdef NAVIERSTOKES
+!
+!     Artificial viscous flux of the elements: shock capturing only
+!     -------------------------------------------------------------
+      if ( controlVariables % containsKey("enable shock-capturing") ) then
+         if ( controlVariables % logicalValueForKey("enable shock-capturing") ) then
+            do eID = 1, size(self % elements)
+               associate (e => self % elements(eID))
+               allocate(e % storage % AviscContravariantFlux(1:NCONS, 0:e % Nxyz(1), 0:e % Nxyz(2), 0:e % Nxyz(3), 1:NDIM))
+               e % storage % AviscContravariantFlux = 0.0_RP
+               end associate
+            end do
+         end if
+      end if
+#endif
 
    end subroutine HexMesh_AllocateStorage
 
@@ -4443,6 +4458,9 @@ slavecoord:             DO l = 1, 4
       !-----------------------------------------------------------
       integer :: eID
       integer     :: i, j, k, iFace, fID, zoneID, nZones
+#ifdef NAVIERSTOKES
+      logical     :: scOnDevice
+#endif
       !-----------------------------------------------------------
 #ifdef _OPENACC
       integer(kind=cuda_count_kind) :: heapsize 
@@ -4454,6 +4472,12 @@ slavecoord:             DO l = 1, 4
 #endif
  
       print*, "I allocate the device data"
+
+#ifdef NAVIERSTOKES
+!     The shock-capturing fluxes go to the device only in shock-capturing runs
+      scOnDevice = .false.
+      if (size(self % elements) > 0) scOnDevice = allocated(self % elements(1) % storage % AviscContravariantFlux)
+#endif
 
       !!$acc enter data copyin(self)
       !$acc update device(self)
@@ -4508,7 +4532,9 @@ slavecoord:             DO l = 1, 4
          end if
 #endif
 #ifdef NAVIERSTOKES
-         !$acc enter data copyin(self % elements(eID) % storage % AviscContravariantFlux) !Shock-capturing artificial viscous flux
+         if (allocated(self % elements(eID) % storage % AviscContravariantFlux)) then
+            !$acc enter data copyin(self % elements(eID) % storage % AviscContravariantFlux) !Shock-capturing artificial viscous flux
+         end if
 #endif
 #ifdef CAHNHILLIARD
          !$acc enter data copyin(self % elements(eID) % storage % c)     ! CHE concentration
@@ -4567,8 +4593,10 @@ slavecoord:             DO l = 1, 4
          !$acc enter data copyin(self % faces(iFace) % storage(1) % rho)
          !$acc enter data copyin(self % faces(iFace) % storage(2) % rho)
 #ifdef NAVIERSTOKES
-         !$acc enter data copyin(self % faces(iFace) % storage(1) % AviscFlux) !Shock-capturing artificial viscous flux
-         !$acc enter data copyin(self % faces(iFace) % storage(2) % AviscFlux) !Shock-capturing artificial viscous flux
+         if (scOnDevice) then
+            !$acc enter data copyin(self % faces(iFace) % storage(1) % AviscFlux) !Shock-capturing artificial viscous flux
+            !$acc enter data copyin(self % faces(iFace) % storage(2) % AviscFlux) !Shock-capturing artificial viscous flux
+         end if
 #endif
          !$acc enter data copyin(self % faces(iFace) % geom)
          !$acc enter data copyin(self % faces(iFace) % geom % x)
@@ -4655,9 +4683,18 @@ slavecoord:             DO l = 1, 4
       !-----------------------------------------------------------
       integer :: eID
       integer     :: i, j, k, iFace, fID, zoneID, nZones
+#ifdef NAVIERSTOKES
+      logical     :: scOnDevice
+#endif
       !-----------------------------------------------------------
 
       print*, "I de-allocate the device data"
+
+#ifdef NAVIERSTOKES
+!     The shock-capturing fluxes are on the device only in shock-capturing runs
+      scOnDevice = .false.
+      if (size(self % elements) > 0) scOnDevice = allocated(self % elements(1) % storage % AviscContravariantFlux)
+#endif
 
       DO eID = 1, SIZE(self % elements)
          !$acc exit data delete(self % elements(eID) % Nxyz)
@@ -4700,7 +4737,9 @@ slavecoord:             DO l = 1, 4
          end if
 #endif
 #ifdef NAVIERSTOKES
-         !$acc exit data delete(self % elements(eID) % storage % AviscContravariantFlux) !Shock-capturing artificial viscous flux
+         if (allocated(self % elements(eID) % storage % AviscContravariantFlux)) then
+            !$acc exit data delete(self % elements(eID) % storage % AviscContravariantFlux) !Shock-capturing artificial viscous flux
+         end if
 #endif
 #ifdef CAHNHILLIARD
          !$acc exit data delete(self % elements(eID) % storage % c)     ! CHE concentration
@@ -4750,8 +4789,10 @@ slavecoord:             DO l = 1, 4
          !$acc exit data delete(self % faces(iFace) % storage(1) % rho)
          !$acc exit data delete(self % faces(iFace) % storage(2) % rho)
 #ifdef NAVIERSTOKES
-         !$acc exit data delete(self % faces(iFace) % storage(1) % AviscFlux) !Shock-capturing artificial viscous flux
-         !$acc exit data delete(self % faces(iFace) % storage(2) % AviscFlux) !Shock-capturing artificial viscous flux
+         if (scOnDevice) then
+            !$acc exit data delete(self % faces(iFace) % storage(1) % AviscFlux) !Shock-capturing artificial viscous flux
+            !$acc exit data delete(self % faces(iFace) % storage(2) % AviscFlux) !Shock-capturing artificial viscous flux
+         end if
 #endif
          !$acc exit data delete(self % faces(iFace) % storage)
          !$acc exit data delete(self % faces(iFace) % geom % x)

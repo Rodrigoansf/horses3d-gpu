@@ -819,9 +819,6 @@ module StorageClass
          ALLOCATE( self % G_NS   (NCONS,0:Nx,0:Ny,0:Nz) )
          ALLOCATE( self % S_NS   (NCONS,0:Nx,0:Ny,0:Nz) )
          ALLOCATE( self % S_NSP  (NCONS,0:Nx,0:Ny,0:Nz) )
-#ifdef NAVIERSTOKES
-         allocate(self % AviscContravariantFlux(1:NCONS, 0:Nx, 0:Ny, 0:Nz, 1:NDIM))
-#endif
 #if defined (SPALARTALMARAS)
          ALLOCATE( self % S_SA  (NCONS,0:Nx,0:Ny,0:Nz) )
 #endif
@@ -901,7 +898,7 @@ module StorageClass
          self % contravariantFlux    = 0.0_RP
          self % rho    = 0.0_RP
 #ifdef NAVIERSTOKES
-         self % AviscContravariantFlux = 0.0_RP
+         if (allocated(self % AviscContravariantFlux)) self % AviscContravariantFlux = 0.0_RP
 #endif
 #ifndef ACOUSTIC
          self % mu_NS  = 0.0_RP
@@ -1021,7 +1018,7 @@ module StorageClass
          to % S_NS   = from % S_NS
          to % S_NSP  = from % S_NSP
 #ifdef NAVIERSTOKES
-         to % AviscContravariantFlux = from % AviscContravariantFlux
+         if (allocated(from % AviscContravariantFlux)) to % AviscContravariantFlux = from % AviscContravariantFlux
 #endif
 #if defined (SPALARTALMARAS)
          to % S_SA   = from % S_SA
