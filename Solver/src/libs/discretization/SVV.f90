@@ -77,33 +77,13 @@ module SpectralVanishingViscosity
 
    type(SVV_t), protected :: SVV
 !
-!  =====================================================================
-!  SCDEV_DISPATCH (SVV) -- what the device SVV kernel reads
-!  =====================================================================
-!
-!  SVV_t holds procedure pointers and one allocatable filter matrix per
-!  polynomial order; neither can be used in an OpenACC compute region. So,
-!  as for the other shock-capturing methods (see SCDEV_DISPATCH in
-!  ShockCapturing.f90), InitializeSVV and SVV_UpdateFilters copy them into
-!  the plain module data below and push it to the device:
-!
-!     SVVdev_kind   replaces Compute_Hflux / Compute_SVV (select case in
-!                   SVV_Hflux_0D / SVV_Flux_0D).
-!     SVVdev_lowPass filterType == LPASS_FILTER.
-!     SVVdev_filter filters(N) % Q(i,l) is SVVdev_filter(i,l,N), for every
-!                   constructed N.
-!     SVVdev_W      per-element scratch for the three 1D filter passes, the
-!                   size of AviscContravariantFlux. Only allocated when SVV
-!                   is used.
-!     SVVdev_mu     sqrt(mu) and sqrt(alpha) at every node, kept from the
-!                   first pass to the last so they are computed once.
-!     SVVdev_diss   per-element SVV dissipation, contiguous so the monitors
-!                   can get it back in one transfer (see
-!                   SC_UpdateHostArtificialDiss in ShockCapturing.f90).
-!
-!  The kernel itself, SC_ComputeElementSVVFlux, is in ShockCapturing.f90,
-!  next to the viscosity parameters it needs.
-!  =====================================================================
+!  Device copy of SVV (procedure pointers and per-order filters cannot be used
+!  in OpenACC compute regions), filled by InitializeSVV. The kernel is
+!  SC_ComputeElementSVVFlux, in ShockCapturing.f90.
+!     SVVdev_kind, SVVdev_lowPass : Compute_Hflux/Compute_SVV and filterType
+!     SVVdev_filter(:,:,N)        : filters(N) % Q
+!     SVVdev_W, SVVdev_mu         : per-element scratch
+!     SVVdev_diss                 : dissipation of each element, for the monitors
 !
    integer, parameter :: SVV_PHYS_ENERGY  = 1   !< Physical dissipation, energy gradient variables
    integer, parameter :: SVV_PHYS_ENTROPY = 2   !< Physical dissipation, entropy gradient variables
@@ -280,10 +260,8 @@ module SpectralVanishingViscosity
             end select
          end select
 !
-!        ------------------------------------------------------------
-!        Flatten for the device (see SCDEV_DISPATCH (SVV) at the top)
-!        ------------------------------------------------------------
-!
+!        Device copy
+!        -----------
          select case (self % diss_type)
          case (GUERMOND_DISS)
             SVVdev_kind = SVV_GP_ENTROPY
@@ -298,9 +276,8 @@ module SpectralVanishingViscosity
          SVVdev_lowPass = (self % filterType == LPASS_FILTER)
          !$acc update device(SVVdev_kind, SVVdev_lowPass)
 !
-!        Scratch sized for the orders at start-up. The filters are also only
-!        built here (and for the TE sensor's coarse mesh), so neither path
-!        follows a change of order during the run.
+!        Sized for the orders at start-up: like the filters, it does not follow
+!        a change of order during the run
 !
          safedeallocate(SVVdev_W)
          safedeallocate(SVVdev_mu)
@@ -1005,11 +982,7 @@ module SpectralVanishingViscosity
 !
 !//////////////////////////////////////////////////////////////////////////////////////////////////////////////
 !
-!        SCDEV_DISPATCH (SVV) -- device-side replacements for the Compute_Hflux and
-!        Compute_SVV procedure pointers: same choice, made with a select case on
-!        SVVdev_kind (set in InitializeSVV).
-!
-!//////////////////////////////////////////////////////////////////////////////////////////////////////////////
+!        Device versions of the Compute_Hflux and Compute_SVV pointers
 !
       subroutine SVV_Hflux_0D(Q, Ux, Uy, Uz, sqrt_mu, sqrt_alpha, Hx, Hy, Hz)
          !$acc routine seq

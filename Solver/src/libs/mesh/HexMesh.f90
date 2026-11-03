@@ -1316,10 +1316,9 @@ slavecoord:             DO l = 1, 4
             call self % MPIfaces % faces(domain) % RecvAviscFlux(domain, nEqn)
          end do
 !
-!        The flux is prolonged to the faces on the device (SC_ProlongAviscFluxToFaces,
-!        queue 1) and packed here on the host: wait for it, and bring this side of
-!        each MPI face back below. No-op on CPU builds.
-!        ------------------------------------------------------------------------------
+!        Wait for SC_ProlongAviscFluxToFaces (queue 1); this side of the MPI faces
+!        is sent to the host below
+!        -------------------------------------------------------------------------
          !$acc wait(1)
 !
 !        ***********
@@ -1586,10 +1585,8 @@ slavecoord:             DO l = 1, 4
                end do               ; end do
                end associate
 !
-!              The neighbour's flux was unpacked on the host, but computeMPIFaceFlux
-!              runs on the device: without this the device keeps the neighbour's
-!              flux from the previous stage. No-op on CPU builds.
-!              ----------------------------------------------------------------
+!              The neighbour's flux is used on the device
+!              ------------------------------------------
                !$acc update device(self % faces(fID) % storage(otherSide(thisSide)) % AviscFlux)
             end do
          end do

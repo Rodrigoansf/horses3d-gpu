@@ -116,36 +116,11 @@ module ShockCapturing
 
    type(SCdriver_t), allocatable :: ShockCapturingDriver
 !
-!  =====================================================================
-!  SCDEV_DISPATCH -- device-side shock capturing: START HERE
-!  =====================================================================
-!
-!  The host configuration above is polymorphic (class(ArtificialViscosity_t)
-!  method1/method2) and holds a procedure pointer (ViscousFlux). Neither can be
-!  dispatched from an OpenACC compute region, which is why the artificial
-!  viscosity was left unwired when the solver was ported to the GPU.
-!
-!  The fix flattens the configuration into plain module scalars that live on
-!  the device, and replaces the procedure pointer with a "select case"
-!  inside an "!$acc routine seq".
-!
-!  Arrays are indexed by sensor REGION (1 = first method, 2 = second method),
-!  matching the "region" argument threaded through AV_initialize.
-!
-!  These are written ONCE, by SC_SyncDeviceConfig, at the end of
-!  Initialize_ShockCapturing. Everything here is configuration, not state --
-!  the only per-step quantity is the sensor, which is updated separately
-!  (see SC_UpdateSensorOnDevice).
-!
-!  TO ADD A NEW VISCOUS FLUX TYPE: add a case to SC_ArtificialViscousFlux_0D
-!  and to NoSVV_initialize. To add a new viscosity update method, add a case to
-!  SC_ElementViscosity. Callers need no changes.
-!
-!        grep -rn "SCDEV_DISPATCH" Solver/src
-!  =====================================================================
+!  Flat copy of the configuration for the device kernels, indexed by region
+!  (1: first method, 2: second method): polymorphic components and procedure
+!  pointers cannot be used in OpenACC compute regions.
 !
    logical  :: SCdev_isActive        = .false.
-   logical  :: SCdev_onDevice        = .true.   !< .false. if any method needs the host path
    logical  :: SCdev_hasMethod(2)    = .false.
    integer  :: SCdev_update(2)       = SC_CONST_ID
    integer  :: SCdev_fluxType(2)     = SC_PHYS_ID
@@ -154,8 +129,7 @@ module ShockCapturing
    real(RP) :: SCdev_smagC(2)        = 0.0_RP
    integer  :: SCdev_smagWallModel(2) = 0
 !
-!  SVV (filtered) methods only: the square roots SVV_initialize precomputes.
-!  The filter itself is in SpectralVanishingViscosity (SVVdev_*).
+!  SVV only (the filter itself is in SpectralVanishingViscosity)
    logical  :: SCdev_isSVV(2)        = .false.
    logical  :: SCdev_alphaPropMu(2)  = .false.
    real(RP) :: SCdev_sqrtMu1(2)      = 0.0_RP
@@ -164,20 +138,16 @@ module ShockCapturing
    real(RP) :: SCdev_sqrtAlpha2(2)   = 0.0_RP
    real(RP) :: SCdev_sqrtMu2Alpha(2) = 0.0_RP
 !
-!  copyin, not create: "create" would reserve the memory without initialising
-!  it, and Initialize_ShockCapturing is not reached at all for an Euler run
-!  (it sits inside "if (flowIsNavierStokes)"). copyin seeds the device with the
-!  defaults above, so the guards below are always defined; SC_SyncDeviceConfig
-!  then overwrites them when shock capturing is actually configured. Same
-!  pattern as grad_vars in PhysicsStorage_NS.
+!  copyin, so that the defaults reach the device also when
+!  Initialize_ShockCapturing is not called (Euler)
 !
-   !$acc declare copyin(SCdev_isActive, SCdev_onDevice)
+   !$acc declare copyin(SCdev_isActive)
    !$acc declare copyin(SCdev_hasMethod, SCdev_update, SCdev_fluxType)
    !$acc declare copyin(SCdev_mu1, SCdev_mu2, SCdev_smagC, SCdev_smagWallModel)
    !$acc declare copyin(SCdev_isSVV, SCdev_alphaPropMu, SCdev_sqrtMu1, SCdev_sqrtMu2)
    !$acc declare copyin(SCdev_sqrtAlpha1, SCdev_sqrtAlpha2, SCdev_sqrtMu2Alpha)
 
-   public :: SCdev_isActive, SCdev_onDevice
+   public :: SCdev_isActive
    public :: SC_ComputeElementAviscFlux, SC_ProlongAviscFluxToFaces
    public :: SC_UpdateSensorOnDevice, SC_UpdateHostArtificialDiss
 !
@@ -229,11 +199,8 @@ module ShockCapturing
 
       if (.not. self % isActive) then
 !
-!        Still has to reach the device: "!$acc declare create" reserves the
-!        memory but does not initialise it, so without this the device copy of
-!        SCdev_isActive is undefined and the guards in the time-derivative
-!        kernels would branch on garbage.
-!        ---------------------------------------------------------------------
+!        Push the defaults to the device
+!        -------------------------------
          call SC_SyncDeviceConfig(self)
          return
       end if
@@ -324,20 +291,15 @@ module ShockCapturing
 !
    subroutine SC_SyncDeviceConfig(self)
 !
-!     ---------------------------------------------------------------------
-!     SCDEV_DISPATCH -- copy the polymorphic host configuration into the flat
-!     module scalars the device kernels read, then push them to the device.
-!
-!     Called once, from Initialize_ShockCapturing. See the SCDEV_DISPATCH
-!     block at the top of this file for the convention.
-!     ---------------------------------------------------------------------
+!     Push the flat configuration, filled by the methods' initializers, to
+!     the device
 !
       implicit none
       type(SCdriver_t), intent(in) :: self
 
       SCdev_isActive = self % isActive
 
-      !$acc update device(SCdev_isActive, SCdev_onDevice)
+      !$acc update device(SCdev_isActive)
       !$acc update device(SCdev_hasMethod, SCdev_update, SCdev_fluxType)
       !$acc update device(SCdev_mu1, SCdev_mu2, SCdev_smagC, SCdev_smagWallModel)
       !$acc update device(SCdev_isSVV, SCdev_alphaPropMu, SCdev_sqrtMu1, SCdev_sqrtMu2)
@@ -349,15 +311,7 @@ module ShockCapturing
 !
    subroutine SC_UpdateSensorOnDevice(mesh)
 !
-!     ---------------------------------------------------------------------
-!     SCDEV_DISPATCH -- push the freshly-computed sensor to the device.
-!
-!     The sensor is computed on the host (it clusters a scalar per element, so
-!     a host round-trip is cheap compared with porting the clustering). The
-!     element storage was copied to the device once at start-up, so without
-!     this update every device kernel would read the sensor value from
-!     initialisation forever.
-!     ---------------------------------------------------------------------
+!     The sensor is computed on the host
 !
       implicit none
       type(HexMesh), intent(in) :: mesh
@@ -389,19 +343,11 @@ module ShockCapturing
       real(RP),          intent(in)    :: t
 
 !
-!     The sensor runs on the host, but between solution files Q only exists on
-!     the device -- the host copy is whatever was left over from the last save.
-!     Without this pull the sensor clusters a stale solution and then gets
-!     written out next to a fresh Q as if the two were contemporaneous.
-!     ------------------------------------------------------------------------
+!     The sensor runs on the host
+!     ---------------------------
       call sem % mesh % UpdateHostData()
 
       call self % sensor % Compute(sem, t)
-!
-!     Push the result back: the element storage was copied to the device once
-!     at start-up, so the artificial-viscosity kernels would otherwise keep
-!     reading the sensor value from initialisation.
-!     ------------------------------------------------------------------------
       call SC_UpdateSensorOnDevice(sem % mesh)
 
    end subroutine SC_detect
@@ -458,15 +404,7 @@ module ShockCapturing
 !
    pure subroutine SC_ArtificialViscousFlux_0D(region, Q, Q_x, Q_y, Q_z, mu, beta, kappa, F)
 !
-!     ---------------------------------------------------------------------
-!     SCDEV_DISPATCH -- device-side replacement for the "self % ViscousFlux"
-!     procedure pointer of SC_NoSVV_t.
-!
-!     A procedure pointer cannot be called from an OpenACC compute region, so
-!     the same choice is made here with a "select case" on the flattened
-!     SCdev_fluxType. The Physical branch selects on grad_vars, as
-!     NoSVV_initialize does on the host.
-!     ---------------------------------------------------------------------
+!     Device version of the ViscousFlux procedure pointer of SC_NoSVV_t
 !
       !$acc routine seq
       use Physics,        only: GuermondPopovFlux_ENTROPY, ViscousFlux_STATE, &
@@ -501,21 +439,8 @@ module ShockCapturing
 !
    subroutine SC_ComputeElementAviscFlux(e, eID)
 !
-!     ---------------------------------------------------------------------
-!     SCDEV_DISPATCH -- artificial viscous flux of one element, in
-!     contravariant form, written into e % storage % AviscContravariantFlux.
-!
-!     This is the device-ready equivalent of SC_viscosity + NoSVV_viscosity:
-!     same mathematics, but the region is chosen with plain integers instead
-!     of allocatable polymorphic components, and the flux with a select case
-!     instead of a procedure pointer. Unlike its host counterpart it does NOT
-!     prolong to the faces -- see SC_ProlongAviscFluxToFaces.
-!
-!     Both paths must stay in step: SC_viscosity is still what the isolated
-!     time derivative (and hence the sensor) uses.
-!
-!     SVV elements are handed to SC_ComputeElementSVVFlux.
-!     ---------------------------------------------------------------------
+!     Device version of SC_viscosity and NoSVV_viscosity for one element. The
+!     flux is prolonged to the faces by SC_ProlongAviscFluxToFaces.
 !
       !$acc routine vector
 #if !defined (SPALARTALMARAS)
@@ -566,8 +491,6 @@ module ShockCapturing
 
       else
 
-!        Written out rather than product(e % Nxyz + 1): array-valued intrinsics
-!        on device routines are a portability hazard, and this is three terms.
          delta = ( e % geom % Volume                                            &
                  / real((e % Nxyz(1)+1)*(e % Nxyz(2)+1)*(e % Nxyz(3)+1), RP) )  &
                  ** (1.0_RP / 3.0_RP)
@@ -639,31 +562,11 @@ module ShockCapturing
 !
    subroutine SC_ComputeElementSVVFlux(e, eID, region, switch)
 !
-!     ---------------------------------------------------------------------
-!     SCDEV_DISPATCH (SVV) -- SVV flux of one element, in contravariant form,
-!     written into e % storage % AviscContravariantFlux.
-!
-!     The device-ready equivalent of SVV_viscosity + SVV % ComputeInnerFluxes,
-!     with the same arithmetic in the same order. Like
-!     SC_ComputeElementAviscFlux it does NOT prolong to the faces.
-!
-!     sqrt(mu) and sqrt(alpha) are computed once per node, in the first pass,
-!     and kept in SVVdev_mu. H = sqrt(J) * Hflux(Q, grad U) is filtered one
-!     direction at a time, with filters(N) % Q = SVVdev_filter(:,:,N):
-!        xi   : SVVdev_W(eID)          -> AviscContravariantFlux
-!        eta  : AviscContravariantFlux -> SVVdev_W(eID)
-!        zeta : SVVdev_W(eID)          -> used node by node for the flux,
-!                                         which overwrites AviscContravariantFlux
-!     The unfiltered H is needed again only for low-pass filters, and is then
-!     recomputed at the node.
-!
-!     Q and the gradients of each node are copied into small local arrays
-!     before the pointwise calls: passing e % storage % Q(:,i,j,k) (a pointer
-!     component) makes gfortran pack and unpack a temporary for every call.
-!     No USE statements here or in SC_SVVViscosity_0D: with gfortran, a
-!     procedure-level USE of a module that reaches IEEE_ARITHMETIC makes the
-!     procedure save and restore the floating-point state on every call.
-!     ---------------------------------------------------------------------
+!     Device version of SVV_viscosity for one element: H = sqrt(J) Hflux is
+!     filtered in xi, eta and zeta, with SVVdev_W and AviscContravariantFlux
+!     taking turns as scratch. Q and its gradients are copied to local arrays,
+!     and there is no USE here: otherwise gfortran makes a temporary, or saves
+!     the FP state, at every call.
 !
       !$acc routine vector
       implicit none
@@ -853,13 +756,8 @@ module ShockCapturing
 !
    subroutine SC_SVVViscosity_0D(region, switch, hn, delta, dWall, Q, Ux, Uy, Uz, sqrt_mu, sqrt_alpha)
 !
-!     ---------------------------------------------------------------------
-!     SCDEV_DISPATCH (SVV) -- sqrt(mu) and sqrt(alpha) at one node, as
-!     SVV_viscosity computes them.
-!
-!     With the Smagorinsky update and no "alpha/mu" ratio, SVV_viscosity
-!     leaves alpha undefined; here it is zero.
-!     ---------------------------------------------------------------------
+!     sqrt(mu) and sqrt(alpha) at one node, as in SVV_viscosity (alpha is zero
+!     where SVV_viscosity leaves it undefined)
 !
       !$acc routine seq
       implicit none
@@ -911,8 +809,7 @@ module ShockCapturing
 !
    subroutine SC_SVVGetNode(e, i, j, k, Q, Ux, Uy, Uz)
 !
-!     SCDEV_DISPATCH (SVV) -- Q and the gradients of node (i,j,k), copied out
-!     so the pointwise routines get plain contiguous arrays.
+!     Q and the gradients of node (i,j,k) as contiguous arrays
 !
       !$acc routine seq
       implicit none
@@ -936,13 +833,7 @@ module ShockCapturing
 !
    subroutine SC_UpdateHostArtificialDiss(mesh)
 !
-!     ---------------------------------------------------------------------
-!     SCDEV_DISPATCH (SVV) -- bring the SVV dissipation of every element back
-!     to e % storage % artificialDiss, which the volume monitors read on the
-!     host. One contiguous transfer, after waiting for the element kernel
-!     (queue 1). Nothing to do for the other methods, whose device path does
-!     not compute it.
-!     ---------------------------------------------------------------------
+!     SVV dissipation of each element back to the host, for the monitors
 !
       implicit none
       type(HexMesh), intent(inout) :: mesh
@@ -962,19 +853,8 @@ module ShockCapturing
 !
    subroutine SC_ProlongAviscFluxToFaces(mesh)
 !
-!     ---------------------------------------------------------------------
-!     SCDEV_DISPATCH -- send each element's artificial viscous flux to its six
-!     faces, so the interface terms can average the two sides.
-!
-!     Device-resident, with the same loop as HexMesh_ProlongSolToFaces: one
-!     iteration per (element, face) pair, each writing its own side of the
-!     face (HexElement_ProlongAviscToFaces -> Face_AdaptAviscToFace). Like the
-!     solution and the gradients, it handles rotated faces but not
-!     p-nonconforming ones: the Tset projections are not on the device.
-!
-!     The host routine (HexElement_ProlongAviscFluxToFaces, with projections)
-!     is still what SC_viscosity calls, i.e. the isolated time derivative.
-!     ---------------------------------------------------------------------
+!     Element AV flux to the faces, on the device. As HexMesh_ProlongSolToFaces,
+!     it handles rotated faces but not p-nonconforming ones.
 !
       implicit none
       type(HexMesh), intent(inout) :: mesh

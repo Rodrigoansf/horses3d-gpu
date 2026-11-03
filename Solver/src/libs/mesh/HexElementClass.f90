@@ -773,11 +773,9 @@
 
       end subroutine HexElement_ProlongAviscFluxToFaces
 !
-!     Device version of HexElement_ProlongAviscFluxToFaces, for one face of the element
-!     (side = 1..6, as in HexElement_ProlongSolToFaces). The face takes the contravariant
-!     component normal to it, with a minus sign on the FRONT, BOTTOM and LEFT faces. The
-!     sums start from zero and run in the same order as in the host routine, so the
-!     values are the same. Q_aux is used as scratch, as for the solution.
+!     Device version of HexElement_ProlongAviscFluxToFaces for one face (side = 1..6, as in
+!     HexElement_ProlongSolToFaces), with the same sums in the same order. Q_aux is used as
+!     scratch, as for the solution.
 !
       subroutine HexElement_ProlongAviscToFaces(self, nEqn, f_side, AVflux, side)
          !$acc routine vector

@@ -318,11 +318,8 @@ module Storage
 !        ---------------------
          self % refs = getSolutionFileReferenceValues(trim(solutionName))
 !
-!        The entropy-variable conversion of the saved gradients evaluates the
-!        pressure with the solver's Pressure(Q), i.e. with the module
-!        thermodynamics, which horses2plt never constructs (gamma - 1 = 0 gave
-!        p = 0 and NaN velocity gradients). Take gamma and R from the file.
-!        -------------------------------------------------------------------
+!        gamma and R for Pressure(Q) in the gradient-variable conversions
+!        ----------------------------------------------------------------
          if (self % refs(GAMMA_REF) > 1.0_RP) call SetThermodynamicsFromRefs(self % refs)
 !
 !        Read coordinates
@@ -636,12 +633,10 @@ module Storage
 !////////////////////////////////////////////////////////////////////////
 !
       subroutine SetThermodynamicsFromRefs(refs)
-!
 !        *************************************************************
-!        Thermodynamic constants from the reference values saved in a
-!        solution file, built as in PhysicsStorage_NS (ThermodynamicsAir).
+!        Thermodynamics from the reference values of a solution file,
+!        as in PhysicsStorage_NS (ThermodynamicsAir)
 !        *************************************************************
-!
          use FluidData, only: Thermodynamics_t, SetThermodynamics
          implicit none
          real(kind=RP), intent(in) :: refs(NO_OF_SAVED_REFS)

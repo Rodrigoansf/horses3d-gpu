@@ -198,9 +198,8 @@ module Clustering
 
    real(RP), parameter :: LOG2PI = log(2.0_RP*PI)
 !
-!  State of the generator used for the random initial centroids, see
-!  clustering_random. Fixed seed: the sensor is reproducible run to run.
-!  ---------------------------------------------------------------------
+!  Seed of clustering_random
+!  -------------------------
    integer, save :: clustering_seed = 20240917
 !
 !  ========
@@ -209,20 +208,9 @@ module Clustering
 !
 !///////////////////////////////////////////////////////////////////////////////
 !
-!  Uniform numbers in (0,1) for the random initial centroids.
-!
-!  These used to come from the intrinsic random_number, which gfortran seeds
-!  from the OS on every run (random_seed is never called) and nvfortran seeds
-!  with its own sequence. The GMM sensor was therefore different on every run
-!  of the same case -- from a bit-identical solution, whole elements changed
-!  cluster (sensor jumps of 0.25-0.5) -- and CPU and GPU builds could never
-!  agree. That made any comparison between runs with the GMM sensor (e.g. two
-!  "gradient variables" choices) partly a comparison of two random sensors.
-!
-!  This is Park & Miller's minimal standard generator (a = 16807,
-!  m = 2**31-1) with Schrage's factorisation, so it never overflows default
-!  integers and gives the same sequence with every compiler. Only the root
-!  rank calls it (the centroids are then broadcast), as before.
+!  Uniform numbers in (0,1) for the initial centroids, from Park & Miller's
+!  minimal standard generator, so that every compiler (CPU and GPU builds)
+!  gets the same centroids. Only the root rank calls it.
 !
    subroutine clustering_random(x)
       implicit none

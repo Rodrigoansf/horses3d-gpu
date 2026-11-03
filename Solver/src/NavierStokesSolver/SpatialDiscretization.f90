@@ -450,10 +450,6 @@ module SpatialDiscretization
 !        Shock-capturing (artificial viscosity)
 !        *******************************
 !
-!        Must run after the gradients (it differentiates U_x/U_y/U_z) and before
-!        the volume integrals, which consume AviscContravariantFlux. See the
-!        SCDEV_DISPATCH block in ShockCapturing.f90.
-!
          if (ShockCapturingDriver % isActive) then
             call TimeDerivative_ComputeArtificialViscosity(mesh)
          end if
@@ -1297,60 +1293,21 @@ module SpatialDiscretization
 !
       subroutine TimeDerivative_ComputeArtificialViscosity(mesh)
 !
-!        ---------------------------------------------------------------------
-!        Fill AviscContravariantFlux on every element and hand it to the faces.
-!
-!        This routine is what re-connects the shock capturing: before it, the
-!        artificial viscosity was computed nowhere on this path, so enabling
-!        shock capturing changed the solution by exactly zero.
-!
-!        Both the element kernel and the prolongation to the faces
-!        (SC_ProlongAviscFluxToFaces) are device-resident: the flux stays on
-!        the GPU. Only the SVV dissipation (one scalar per element) comes back,
-!        and, in MPI runs, this side of each MPI face for the exchange
-!        (HexMesh_UpdateMPIFacesAviscFlux).
-!        ---------------------------------------------------------------------
+!        Artificial viscous flux of every element, prolonged to the faces
 !
          use HexMeshClass
          implicit none
          type(HexMesh), intent(inout) :: mesh
-         integer :: eID, fID
+         integer :: eID
 
-         if (SCdev_onDevice) then
+         !$acc parallel loop gang present(mesh) async(1)
+         do eID = 1, size(mesh % elements)
+            call SC_ComputeElementAviscFlux(mesh % elements(eID), eID)
+         end do
+         !$acc end parallel loop
 
-            !$acc parallel loop gang present(mesh) async(1)
-            do eID = 1, size(mesh % elements)
-               call SC_ComputeElementAviscFlux(mesh % elements(eID), eID)
-            end do
-            !$acc end parallel loop
-!
-!           SVV dissipation for the volume monitors (SVV runs only)
-!           ------------------------------------------------------
-            call SC_UpdateHostArtificialDiss(mesh)
-!
-!           Element flux -> faces, on the device
-!           ------------------------------------
-            call SC_ProlongAviscFluxToFaces(mesh)
-
-         else
-!
-!           A method with no device kernel (none at present; SVV has one
-!           since SC_ComputeElementSVVFlux): keep using the original host
-!           routine, which computes the flux and prolongs it to the faces in
-!           one go. Host-only -- on GPU this path needs Q and the gradients
-!           pulled back first.
-!           --------------------------------------------------------------
-            do eID = 1, size(mesh % elements)
-               call ShockCapturingDriver % ComputeViscosity(mesh, mesh % elements(eID), &
-                                    mesh % elements(eID) % storage % AviscContravariantFlux)
-            end do
-
-            do fID = 1, size(mesh % faces)
-               !$acc update device(mesh % faces(fID) % storage(1) % AviscFlux)
-               !$acc update device(mesh % faces(fID) % storage(2) % AviscFlux)
-            end do
-
-         end if
+         call SC_UpdateHostArtificialDiss(mesh)
+         call SC_ProlongAviscFluxToFaces(mesh)
 
       end subroutine TimeDerivative_ComputeArtificialViscosity
 !
@@ -1420,9 +1377,8 @@ module SpatialDiscretization
             end do               ; end do                ; end do
 
 !
-!           Artificial viscosity: same sign as the physical viscous flux, which
-!           is already carried with a minus in contravariantFlux above.
-!           --------------------------------------------------------------------
+!           Artificial viscosity, with the sign of the viscous flux
+!           -------------------------------------------------------
             if (SCdev_isActive) then
                !$acc loop vector collapse(3)
                do k = 0, mesh % elements(eID) % Nxyz(3) ; do j = 0, mesh % elements(eID) % Nxyz(2) ; do i = 0, mesh % elements(eID) % Nxyz(1)
@@ -1502,9 +1458,8 @@ module SpatialDiscretization
             end do               ; end do                ; end do
 
 !
-!        Artificial viscosity: same sign as the physical viscous flux, which is
-!        already carried with a minus in contravariantFlux above.
-!        -----------------------------------------------------------------------
+!        Artificial viscosity, with the sign of the viscous flux
+!        -------------------------------------------------------
          if (SCdev_isActive) then
             !$acc loop vector collapse(3)
             do k = 0, mesh % elements(eID) % Nxyz(3) ; do j = 0, mesh % elements(eID) % Nxyz(2) ; do i = 0, mesh % elements(eID) % Nxyz(1)
@@ -1618,9 +1573,8 @@ module SpatialDiscretization
 !        ------------------------
          if (SCdev_isActive) then
 !
-!           Artificial viscosity: average the two sides, as both elements
-!           prolonged their own contravariant flux onto this face.
-!           -----------------------------------------------------------------
+!           Artificial viscosity: average of both sides
+!           -------------------------------------------
             !$acc loop vector collapse(3)
             do j = 0, fc % Nf(2) ; do i = 0, fc % Nf(1) ; do eq = 1, NCONS
                   fc % storage(1) % FStar(eq,i,j) = (fc % storage(1) % FStar(eq,i,j) - fc % storage(2) % FStar(eq,i,j)) * fc % geom % jacobian(i,j) &
@@ -1818,13 +1772,9 @@ module SpatialDiscretization
                                                                     + mesh % faces(fID) % storage(1) % unStar(eq,IZ,i,j)* mesh % faces(fID) % geom % normal(IZ,i,j)
                   end do
 !
-!                 Artificial viscosity must join the viscous flux HERE, before
-!                 FlowNeumann below, not after the Jacobian scaling. An adiabatic
-!                 free-slip wall zeroes this whole vector; if the artificial part
-!                 were added later it would leak through the wall condition.
-!                 Divided by the Jacobian because the scaling is applied further
-!                 down, exactly as in computeElementInterfaceFlux.
-!                 ------------------------------------------------------------
+!                 Artificial viscosity, before FlowNeumann so that the wall
+!                 conditions act on it too (the Jacobian is applied below)
+!                 ---------------------------------------------------------
                   if (SCdev_isActive) then
                      !$acc loop seq
                      do eq = 1, NCONS

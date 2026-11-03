@@ -1138,13 +1138,10 @@ module SCsensorClass
          else
             n = product(e % Nxyz + 1)
 !
-!           Most probable cluster of each node, then the highest one in the
-!           element, i.e. maxval(maxloc(prob(cnt+1:cnt+n,1:nclusters), dim=2)).
-!           Written as a loop because nvfortran's maxloc(..., dim=2) on this
-!           array section corrupts the heap (free() of an invalid pointer inside
-!           pghpf_maxloc_i8), which aborted every GPU run with the GMM sensor.
-!           The strict ">" keeps maxloc's first-occurrence tie-breaking.
-!           ----------------------------------------------------------------
+!           Highest of the most probable clusters of the nodes, as
+!           maxval(maxloc(prob(cnt+1:cnt+n,1:nclusters), dim=2)), which corrupts
+!           the heap with nvfortran. The strict ">" keeps maxloc's tie-breaking.
+!           ----------------------------------------------------------------------
             cluster = 1
             do ip = cnt + 1, cnt + n
                jmax = 1
