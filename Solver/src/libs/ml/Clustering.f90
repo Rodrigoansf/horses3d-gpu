@@ -198,9 +198,35 @@ module Clustering
 
    real(RP), parameter :: LOG2PI = log(2.0_RP*PI)
 !
+!  Seed of clustering_random
+!  -------------------------
+   integer, save :: clustering_seed = 20240917
+!
 !  ========
    contains
 !  ========
+!
+!///////////////////////////////////////////////////////////////////////////////
+!
+!  Uniform numbers in (0,1) for the initial centroids, from Park & Miller's
+!  minimal standard generator, so that every compiler (CPU and GPU builds)
+!  gets the same centroids. Only the root rank calls it.
+!
+   subroutine clustering_random(x)
+      implicit none
+      real(RP), intent(out) :: x(:,:)
+      integer, parameter    :: a = 16807, m = 2147483647, q = 127773, r = 2836
+      integer               :: i, j, hi, lo
+
+      do j = 1, size(x, dim=2) ; do i = 1, size(x, dim=1)
+         hi = clustering_seed / q
+         lo = mod(clustering_seed, q)
+         clustering_seed = a * lo - r * hi
+         if (clustering_seed <= 0) clustering_seed = clustering_seed + m
+         x(i,j) = real(clustering_seed, RP) / real(m, RP)
+      end do                   ; end do
+
+   end subroutine clustering_random
 !
    subroutine kMeans_init(self, ndims, nclusters, maxiters)
 !
@@ -263,7 +289,7 @@ module Clustering
       if (self % initialized) then
 
          if (MPI_Process % isRoot) then
-            call random_number(self % centroids)
+            call clustering_random(self % centroids)
          end if
 
 #if defined(_HAS_MPI_)
@@ -734,7 +760,7 @@ module Clustering
 
          else
             if (MPI_Process % isRoot) then
-               call random_number(self % centroids(:,i1:i2))
+               call clustering_random(self % centroids(:,i1:i2))
             end if
 
 #if defined(_HAS_MPI_)

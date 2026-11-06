@@ -318,6 +318,10 @@ module Storage
 !        ---------------------
          self % refs = getSolutionFileReferenceValues(trim(solutionName))
 !
+!        gamma and R for Pressure(Q) in the gradient-variable conversions
+!        ----------------------------------------------------------------
+         if (self % refs(GAMMA_REF) > 1.0_RP) call SetThermodynamicsFromRefs(self % refs)
+!
 !        Read coordinates
 !        ----------------
          fid = putSolutionFileInReadDataMode(solutionName)
@@ -625,4 +629,29 @@ module Storage
          end select
 
       end subroutine SetGradientVariablesOfSolution
+!
+!////////////////////////////////////////////////////////////////////////
+!
+      subroutine SetThermodynamicsFromRefs(refs)
+!        *************************************************************
+!        Thermodynamics from the reference values of a solution file,
+!        as in PhysicsStorage_NS (ThermodynamicsAir)
+!        *************************************************************
+         use FluidData, only: Thermodynamics_t, SetThermodynamics
+         implicit none
+         real(kind=RP), intent(in) :: refs(NO_OF_SAVED_REFS)
+         type(Thermodynamics_t)    :: thermo
+         real(kind=RP)             :: g, R
+
+         g = refs(GAMMA_REF)
+         R = refs(RGAS_REF)
+         thermo = Thermodynamics_t("From solution file", R, g, sqrt(g), g - 1.0_RP,  &
+                                   (g - 1.0_RP) / 2.0_RP, (g + 1.0_RP) / 2.0_RP,       &
+                                   (g - 1.0_RP) / (2.0_RP * sqrt(g)),                  &
+                                   (g - 1.0_RP) / (2.0_RP * g), 2.0_RP / (g + 1.0_RP), &
+                                   1.0_RP / (g - 1.0_RP), 1.0_RP / g, g / (g - 1.0_RP),&
+                                   R * g / (g - 1.0_RP), R / (g - 1.0_RP), 0.0_RP)
+         call SetThermodynamics(thermo)
+
+      end subroutine SetThermodynamicsFromRefs
 end module Storage

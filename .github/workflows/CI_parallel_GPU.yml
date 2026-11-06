@@ -874,6 +874,48 @@ jobs:
         working-directory: ./Solver/test/NavierStokes/LimiterTest
         run: $GITHUB_WORKSPACE/ci_run_slurm_test.sh NSLimiterTest mpirun -np 2 --bind-to none ./horses3d.ns LimiterTest.control
         if: '!cancelled()'
+#
+# 51) Forward facing step with SVV
+# --------------------------------
+      - name: Build NSForwardFacingStepSVV
+        working-directory: ./Solver/test/NavierStokes/ForwardFacingStepSVV/SETUP
+        run: |
+          source "$GITHUB_WORKSPACE/ci_env.sh"
+          make clean || true
+          make ns COMPILER=nvfortran COMM=PARALLEL ENABLE_THREADS=NO WITH_METIS=YES
+        if: '!cancelled()'
+      - name: Run NSForwardFacingStepSVV
+        working-directory: ./Solver/test/NavierStokes/ForwardFacingStepSVV
+        run: $GITHUB_WORKSPACE/ci_run_slurm_test.sh NSForwardFacingStepSVV mpirun -np 2 --bind-to none ./horses3d.ns FFS_SVV.control
+        if: '!cancelled()'
+#
+# 52) Taylor-Green vortex with SVV-LES
+# ------------------------------------
+      - name: Build NSTaylorGreenSVVLES
+        working-directory: ./Solver/test/NavierStokes/TaylorGreenSVVLES/SETUP
+        run: |
+          source "$GITHUB_WORKSPACE/ci_env.sh"
+          make clean || true
+          make ns COMPILER=nvfortran COMM=PARALLEL ENABLE_THREADS=NO WITH_METIS=YES
+        if: '!cancelled()'
+      - name: Run NSTaylorGreenSVVLES
+        working-directory: ./Solver/test/NavierStokes/TaylorGreenSVVLES
+        run: $GITHUB_WORKSPACE/ci_run_slurm_test.sh NSTaylorGreenSVVLES mpirun -np 2 --bind-to none ./horses3d.ns TaylorGreenSVVLES.control
+        if: '!cancelled()'
+#
+# 53) Mach 2 cylinder with GMM shock capturing
+# --------------------------------------------
+      - name: Build NSCylinderGMM
+        working-directory: ./Solver/test/NavierStokes/CylinderGMM/SETUP
+        run: |
+          source "$GITHUB_WORKSPACE/ci_env.sh"
+          make clean || true
+          make ns COMPILER=nvfortran COMM=PARALLEL ENABLE_THREADS=NO WITH_METIS=YES
+        if: '!cancelled()'
+      - name: Run NSCylinderGMM
+        working-directory: ./Solver/test/NavierStokes/CylinderGMM
+        run: $GITHUB_WORKSPACE/ci_run_slurm_test.sh NSCylinderGMM mpirun -np 2 --bind-to none ./horses3d.ns CylinderGMM.control
+        if: '!cancelled()'
 ########################################################################
 #######                INCOMPRESSIBLE_NS TESTS                 ########
 ########################################################################
