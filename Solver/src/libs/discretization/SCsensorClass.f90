@@ -61,6 +61,7 @@ module SCsensorClass
          procedure :: Compute  => Compute_SCsensor
          procedure :: ApplyInertia => SensorInertia
          procedure :: SensorFromFeatures => GMM_SensorFromFeatures
+         procedure :: SensorFromFeaturesOnDevice => GMM_SensorFromFeatures_acc
          final     :: Destruct_SCsensor
 
    end type SCsensor_t
@@ -1112,6 +1113,79 @@ module SCsensorClass
       nullify(e)
 
    end subroutine GMM_SensorFromFeatures
+!
+!///////////////////////////////////////////////////////////////////////////////
+!
+   subroutine GMM_SensorFromFeatures_acc(sensor, x, first, s)
+!
+!     GMM_SensorFromFeatures with the features x on the device (OpenACC): the clustering
+!     and the sensor s of each element run there, and s is returned on the host and the
+!     device. first(eID) is the index in x of the first node of element eID, and
+!     first(nelem+1) = NDOF + 1. The k-means steps of the clustering use the host copy of x.
+!
+      implicit none
+      class(SCsensor_t), intent(inout) :: sensor
+      real(RP),          intent(inout) :: x(:,:)
+      integer,           intent(in)    :: first(:)
+      real(RP),          intent(inout) :: s(:)
+      logical :: with_kmeans
+
+      call rescale(x, on_device=.true.)
+
+      with_kmeans = sensor % gmm % nclusters == 0
+      call sensor % gmm % fit(x, adapt=.true., from_kmeans=with_kmeans, on_device=.true.)
+      call sensor % gmm % predict(x, on_device=.true.)
+
+      call GMM_ElementSensor(size(s), size(x, dim=2), size(sensor % gmm % prob, dim=2),         &
+                             sensor % gmm % nclusters, first, sensor % gmm % prob, s,          &
+                             .not. sensor % gmm % with_kmeans)
+
+   end subroutine GMM_SensorFromFeatures_acc
+!
+!///////////////////////////////////////////////////////////////////////////////
+!
+   subroutine GMM_ElementSensor(nelem, npts, ncols, nclusters, first, prob, s, dev)
+!
+!     The sensor of each element from the probabilities of its nodes, as in
+!     GMM_SensorFromFeatures, on the device (dev) or on the host; s ends on both
+!
+      implicit none
+      integer,  intent(in)    :: nelem
+      integer,  intent(in)    :: npts
+      integer,  intent(in)    :: ncols
+      integer,  intent(in)    :: nclusters
+      integer,  intent(in)    :: first(nelem+1)
+      real(RP), intent(in)    :: prob(npts, ncols)
+      real(RP), intent(inout) :: s(nelem)
+      logical,  intent(in)    :: dev
+      integer :: eID, ip, jc, jmax, cluster
+
+      !$acc parallel loop gang present(first, prob, s) private(cluster) if(dev)
+      do eID = 1, nelem
+         if (nclusters <= 1) then
+            s(eID) = 0.0_RP
+         else
+            cluster = 1
+            !$acc loop vector reduction(max:cluster) private(jmax)
+            do ip = first(eID), first(eID+1) - 1
+               jmax = 1
+               !$acc loop seq
+               do jc = 2, nclusters
+                  if (prob(ip,jc) > prob(ip,jmax)) jmax = jc
+               end do
+               cluster = max(cluster, jmax)
+            end do
+            s(eID) = real(cluster - 1, RP) / (nclusters - 1)
+         end if
+      end do
+
+      if (dev) then
+         !$acc update self(s)
+      else
+         !$acc update device(s)
+      end if
+
+   end subroutine GMM_ElementSensor
 !
 !///////////////////////////////////////////////////////////////////////////////
 !

@@ -149,7 +149,7 @@ module ShockCapturing
    real(RP), allocatable :: SCdev_sensor(:)
 !
 !  GMM sensor: the features of every node, in the order of Sensor_GMM, and
-!  the index of the first node of every element in them
+!  the index of the first node of every element in them (and NDOF+1 at the end)
    real(RP), allocatable :: SCdev_gmmx(:,:)
    integer,  allocatable :: SCdev_first(:)
 !
@@ -300,12 +300,13 @@ module ShockCapturing
                         TimeDerivative, TimeDerivativeIsolated)
       allocate(SCdev_sensor(sem % mesh % no_of_elements))
       if (self % sensor % sens_type == SC_GMM_ID) then
-         allocate(SCdev_gmmx(2, sem % NDOF), SCdev_first(sem % mesh % no_of_elements))
+         allocate(SCdev_gmmx(2, sem % NDOF), SCdev_first(sem % mesh % no_of_elements + 1))
          ip = 1
          do eID = 1, sem % mesh % no_of_elements
             SCdev_first(eID) = ip
             ip = ip + product(sem % mesh % elements(eID) % Nxyz + 1)
          end do
+         SCdev_first(sem % mesh % no_of_elements + 1) = ip
          !$acc update device(SCdev_first)
       end if
 !
@@ -427,8 +428,7 @@ module ShockCapturing
 !
    subroutine SC_GMMFeaturesOnDevice(mesh)
 !
-!     The features of the GMM sensor on the device, copied to the host
-!     for the clustering
+!     The features of the GMM sensor on the device
 !
       implicit none
       type(HexMesh), intent(inout) :: mesh
@@ -450,9 +450,31 @@ module ShockCapturing
       end do
       !$acc end parallel loop
       !$acc wait(1)
-      !$acc update self(SCdev_gmmx)
 
    end subroutine SC_GMMFeaturesOnDevice
+!
+!///////////////////////////////////////////////////////////////////////////////
+!
+   subroutine SC_ScatterSensor(mesh)
+!
+!     SCdev_sensor, valid on the host and the device, to the elements on both
+!
+      implicit none
+      type(HexMesh), intent(inout) :: mesh
+      integer :: eID
+
+      !$acc parallel loop present(mesh) async(1)
+      do eID = 1, size(mesh % elements)
+         mesh % elements(eID) % storage % sensor = SCdev_sensor(eID)
+      end do
+      !$acc end parallel loop
+
+      do eID = 1, size(mesh % elements)
+         mesh % elements(eID) % storage % sensor = SCdev_sensor(eID)
+      end do
+      !$acc wait(1)
+
+   end subroutine SC_ScatterSensor
 !
 !///////////////////////////////////////////////////////////////////////////////
 !
@@ -490,12 +512,21 @@ module ShockCapturing
 
       case (SC_GMM_ID)
 !
-!        Features on the device, clustering on the host
-!        ----------------------------------------------
+!        Features and clustering on the device
+!        -------------------------------------
          call SC_GMMFeaturesOnDevice(sem % mesh)
+#ifdef _OPENACC
+         call self % sensor % SensorFromFeaturesOnDevice(SCdev_gmmx, SCdev_first, SCdev_sensor)
+         call SC_ScatterSensor(sem % mesh)
+         if (self % sensor % min_steps > 1) then
+            call self % sensor % ApplyInertia(sem)
+            call SC_UpdateSensorOnDevice(sem % mesh)
+         end if
+#else
          call self % sensor % SensorFromFeatures(sem, SCdev_gmmx)
          call self % sensor % ApplyInertia(sem)
          call SC_UpdateSensorOnDevice(sem % mesh)
+#endif
 
       case default
 !
