@@ -18,7 +18,8 @@ module ShockCapturing
    use NodalStorageClass,          only: NodalStorage
 
    use ShockCapturingKeywords
-   use SCsensorClass, only: SCsensor_t, Set_SCsensor, Destruct_SCsensor, GetSensedVariable_0D
+   use SCsensorClass, only: SCsensor_t, Set_SCsensor, Destruct_SCsensor, GetSensedVariable_0D, &
+                            GMMFeatures_0D
 
    implicit none
 
@@ -147,6 +148,11 @@ module ShockCapturing
    real(RP) :: SCdev_ds2      = 0.5_RP
    real(RP), allocatable :: SCdev_sensor(:)
 !
+!  GMM sensor: the features of every node, in the order of Sensor_GMM, and
+!  the index of the first node of every element in them
+   real(RP), allocatable :: SCdev_gmmx(:,:)
+   integer,  allocatable :: SCdev_first(:)
+!
 !  copyin, so that the defaults reach the device also when
 !  Initialize_ShockCapturing is not called (Euler)
 !
@@ -156,7 +162,7 @@ module ShockCapturing
    !$acc declare copyin(SCdev_isSVV, SCdev_alphaPropMu, SCdev_sqrtMu1, SCdev_sqrtMu2)
    !$acc declare copyin(SCdev_sqrtAlpha1, SCdev_sqrtAlpha2, SCdev_sqrtMu2Alpha)
    !$acc declare copyin(SCdev_sensType, SCdev_sVar, SCdev_s0, SCdev_ds, SCdev_ds2)
-   !$acc declare create(SCdev_sensor)
+   !$acc declare create(SCdev_sensor, SCdev_gmmx, SCdev_first)
 
    public :: SCdev_isActive
    public :: SC_ComputeElementAviscFlux, SC_ProlongAviscFluxToFaces
@@ -196,6 +202,7 @@ module ShockCapturing
 !     ---------------
       character(len=:), allocatable :: method
       integer                       :: minSteps
+      integer                       :: eID, ip
 
 !
 !     Check if shock-capturing is requested
@@ -292,6 +299,15 @@ module ShockCapturing
       call Set_SCsensor(self % sensor, controlVariables, sem, minSteps, &
                         TimeDerivative, TimeDerivativeIsolated)
       allocate(SCdev_sensor(sem % mesh % no_of_elements))
+      if (self % sensor % sens_type == SC_GMM_ID) then
+         allocate(SCdev_gmmx(2, sem % NDOF), SCdev_first(sem % mesh % no_of_elements))
+         ip = 1
+         do eID = 1, sem % mesh % no_of_elements
+            SCdev_first(eID) = ip
+            ip = ip + product(sem % mesh % elements(eID) % Nxyz + 1)
+         end do
+         !$acc update device(SCdev_first)
+      end if
 !
 !     Flatten the configuration for the device
 !     ----------------------------------------
@@ -336,7 +352,7 @@ module ShockCapturing
 !     The host sensor goes to the device in one transfer
 !
       implicit none
-      type(HexMesh), intent(in) :: mesh
+      type(HexMesh), intent(inout) :: mesh
       integer :: eID
 
       if (.not. SCdev_isActive) return
@@ -409,6 +425,37 @@ module ShockCapturing
 !
 !///////////////////////////////////////////////////////////////////////////////
 !
+   subroutine SC_GMMFeaturesOnDevice(mesh)
+!
+!     The features of the GMM sensor on the device, copied to the host
+!     for the clustering
+!
+      implicit none
+      type(HexMesh), intent(inout) :: mesh
+      integer :: eID, i, j, k, ip
+
+      !$acc wait
+      !$acc parallel loop gang present(mesh) async(1)
+      do eID = 1, size(mesh % elements)
+         !$acc loop vector collapse(3) private(ip)
+         do k = 0, mesh % elements(eID) % Nxyz(3) ; do j = 0, mesh % elements(eID) % Nxyz(2) ; do i = 0, mesh % elements(eID) % Nxyz(1)
+            ip = SCdev_first(eID) + i + (mesh % elements(eID) % Nxyz(1) + 1) &
+                                 * (j + (mesh % elements(eID) % Nxyz(2) + 1) * k)
+            call GMMFeatures_0D(mesh % elements(eID) % storage % Q(:,i,j,k),   &
+                                mesh % elements(eID) % storage % U_x(:,i,j,k), &
+                                mesh % elements(eID) % storage % U_y(:,i,j,k), &
+                                mesh % elements(eID) % storage % U_z(:,i,j,k), &
+                                SCdev_gmmx(1,ip), SCdev_gmmx(2,ip))
+         end do                ; end do                ; end do
+      end do
+      !$acc end parallel loop
+      !$acc wait(1)
+      !$acc update self(SCdev_gmmx)
+
+   end subroutine SC_GMMFeaturesOnDevice
+!
+!///////////////////////////////////////////////////////////////////////////////
+!
 !     Base class
 !
 !///////////////////////////////////////////////////////////////////////////////
@@ -423,9 +470,6 @@ module ShockCapturing
       type(DGSem),       intent(inout) :: sem
       real(RP),          intent(in)    :: t
 
-!
-!     The sensor runs on the host
-!     ---------------------------
       select case (self % sensor % sens_type)
       case (SC_ZERO_ID, SC_ONE_ID)
 !
@@ -443,6 +487,15 @@ module ShockCapturing
             call self % sensor % ApplyInertia(sem)
             call SC_UpdateSensorOnDevice(sem % mesh)
          end if
+
+      case (SC_GMM_ID)
+!
+!        Features on the device, clustering on the host
+!        ----------------------------------------------
+         call SC_GMMFeaturesOnDevice(sem % mesh)
+         call self % sensor % SensorFromFeatures(sem, SCdev_gmmx)
+         call self % sensor % ApplyInertia(sem)
+         call SC_UpdateSensorOnDevice(sem % mesh)
 
       case default
 !
@@ -1027,6 +1080,8 @@ module ShockCapturing
 
       call Destruct_SCsensor(self % sensor)
       if (allocated(SCdev_sensor)) deallocate(SCdev_sensor)
+      if (allocated(SCdev_gmmx))   deallocate(SCdev_gmmx)
+      if (allocated(SCdev_first))  deallocate(SCdev_first)
 
       if (allocated(self % method1)) deallocate(self % method1)
       if (allocated(self % method2)) deallocate(self % method2)
