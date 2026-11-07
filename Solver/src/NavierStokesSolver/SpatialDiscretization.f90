@@ -1306,7 +1306,6 @@ module SpatialDiscretization
          end do
          !$acc end parallel loop
 
-         call SC_UpdateHostArtificialDiss(mesh)
          call SC_ProlongAviscFluxToFaces(mesh)
 
       end subroutine TimeDerivative_ComputeArtificialViscosity

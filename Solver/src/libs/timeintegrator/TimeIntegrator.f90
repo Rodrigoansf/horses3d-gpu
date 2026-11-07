@@ -551,6 +551,9 @@
       if( sem % mesh % IBM % active ) call sem % mesh % IBM % SemiImplicitCorrection( sem % mesh % elements, dt )
       maxResidual       = ComputeMaxResiduals(sem % mesh)
       sem % maxResidual = maxval(maxResidual)
+#if defined(NAVIERSTOKES)
+      if (ShockCapturingDriver % isActive) call SC_UpdateHostArtificialDiss(sem % mesh)   ! for the monitors
+#endif
       call Monitors % UpdateValues( sem % mesh, t, sem % numberOfTimeSteps, maxResidual, .false., dt )
       call self % Display(sem % mesh, monitors, sem  % numberOfTimeSteps)
 
@@ -733,6 +736,9 @@
 !
 !        Update monitors
 !        ---------------
+#ifdef NAVIERSTOKES
+         if (ShockCapturingDriver % isActive) call SC_UpdateHostArtificialDiss(sem % mesh)   ! for the monitors
+#endif
          call Monitors % UpdateValues( sem % mesh, t, k+1, maxResidual, self% autosave% Autosave(k+1), dt )
 !
 !        Exit if the target is reached
