@@ -3,7 +3,9 @@ module SCsensorClass
 
    use SMConstants,       only: RP, PI, STD_OUT, NDIM, IX, IY, IZ, LINE_LENGTH
    use DGSEMClass,        only: ComputeTimeDerivative_f, DGSem
-   use PhysicsStorage,    only: grad_vars, GRADVARS_STATE, GRADVARS_ENERGY, GRADVARS_ENTROPY, NCONS
+   use PhysicsStorage,    only: grad_vars, GRADVARS_STATE, GRADVARS_ENERGY, GRADVARS_ENTROPY, NCONS, NGRAD, &
+                                IRHO, IRHOU, IRHOV, IRHOW, IRHOE
+   use VariableConversion, only: Pressure, getVelocityGradients_selector
    use NodalStorageClass, only: NodalStorage, NodalStorage_t
    use ElementClass,      only: Element
    use Utilities,         only: toLower
@@ -23,6 +25,7 @@ module SCsensorClass
    public :: SCsensor_t
    public :: Set_SCsensor
    public :: Destruct_SCsensor
+   public :: GetSensedVariable_0D
 
    type :: TruncationError_t
       integer                  :: Nmin       !< Min order N
@@ -55,6 +58,7 @@ module SCsensorClass
 
          procedure :: Describe => Describe_SCsensor
          procedure :: Compute  => Compute_SCsensor
+         procedure :: ApplyInertia => SensorInertia
          final     :: Destruct_SCsensor
 
    end type SCsensor_t
@@ -457,9 +461,6 @@ module SCsensorClass
 !     Local variables
 !     ---------------
 !
-      type(Element), pointer :: e
-      integer                :: eID
-      real(RP)               :: s
 
 !
 !     Compute the sensor
@@ -468,6 +469,23 @@ module SCsensorClass
 !
 !     Add 'inertia' to the scaled value
 !     ---------------------------------
+      call SensorInertia(sensor, sem)
+
+   end subroutine Compute_SCsensor
+!
+!///////////////////////////////////////////////////////////////////////////////
+!
+   subroutine SensorInertia(sensor, sem)
+!
+!     Keep the sensor on for at least min_steps steps once it has fired
+!
+      implicit none
+      class(SCsensor_t),         intent(in)    :: sensor
+      type(DGsem),       target, intent(inout) :: sem
+      type(Element), pointer :: e
+      integer                :: eID
+      real(RP)               :: s
+
       if (sensor % min_steps > 1) then   ! Enter the loop only if necessary
 !$omp parallel do default(private) shared(sem)
          do eID = 1, sem % mesh % no_of_elements
@@ -491,7 +509,7 @@ module SCsensorClass
 
       nullify(e)
 
-   end subroutine Compute_SCsensor
+   end subroutine SensorInertia
 !
 !///////////////////////////////////////////////////////////////////////////////
 !
@@ -1280,5 +1298,58 @@ module SCsensorClass
       end select
 
    end function GetSensedVariable
+!
+!///////////////////////////////////////////////////////////////////////////////
+!
+   function GetSensedVariable_0D(varType, Q, U_x, U_y, U_z) result(s)
+!
+!     GetSensedVariable for the device: explicit sizes, and the velocity gradients
+!     through the selector instead of the procedure pointer
+!
+      !$acc routine seq
+      implicit none
+      integer,  intent(in) :: varType
+      real(RP), intent(in) :: Q(NCONS)
+      real(RP), intent(in) :: U_x(NGRAD)
+      real(RP), intent(in) :: U_y(NGRAD)
+      real(RP), intent(in) :: U_z(NGRAD)
+      real(RP)             :: s
+      real(RP) :: ux(3), uy(3), uz(3)
+
+      select case (varType)
+      case (SC_RHO_ID)
+         s = Q(IRHO)
+      case (SC_RHOU_ID)
+         s = Q(IRHOU)
+      case (SC_RHOV_ID)
+         s = Q(IRHOV)
+      case (SC_RHOW_ID)
+         s = Q(IRHOW)
+      case (SC_RHOE_ID)
+         s = Q(IRHOE)
+      case (SC_U_ID)
+         s = Q(IRHOU) / Q(IRHO)
+      case (SC_V_ID)
+         s = Q(IRHOV) / Q(IRHO)
+      case (SC_W_ID)
+         s = Q(IRHOW) / Q(IRHO)
+      case (SC_P_ID)
+         s = Pressure(Q)
+      case (SC_RHOP_ID)
+         s = Pressure(Q) * Q(IRHO)
+      case (SC_RHO_GRAD_ID)
+         if ( grad_vars == GRADVARS_ENTROPY ) then
+            s = POW2(dot_product(Q, U_x)) + POW2(dot_product(Q, U_y)) + POW2(dot_product(Q, U_z))
+         else ! STATE or ENERGY: d(rho)/dx stored directly in U_x(IRHO)
+            s = POW2(U_x(IRHO)) + POW2(U_y(IRHO)) + POW2(U_z(IRHO))
+         end if
+      case (SC_DIVV_ID)
+         call getVelocityGradients_selector(Q, U_x, U_y, U_z, ux, uy, uz)
+         s = (ux(1) + uy(2) + uz(3))**2
+      case default
+         s = 0.0_RP
+      end select
+
+   end function GetSensedVariable_0D
 
 end module SCsensorClass

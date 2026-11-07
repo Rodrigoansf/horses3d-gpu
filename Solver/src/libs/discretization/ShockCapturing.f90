@@ -1,7 +1,7 @@
 #include "Includes.h"
 module ShockCapturing
 
-   use SMConstants,                only: RP, STD_OUT, LINE_LENGTH, NDIM, IX, IY, IZ
+   use SMConstants,                only: RP, PI, STD_OUT, LINE_LENGTH, NDIM, IX, IY, IZ
    use PhysicsStorage,             only: NCONS, NGRAD
    use FluidData,                  only: dimensionless
    use Utilities,                  only: toLower
@@ -18,7 +18,7 @@ module ShockCapturing
    use NodalStorageClass,          only: NodalStorage
 
    use ShockCapturingKeywords
-   use SCsensorClass, only: SCsensor_t, Set_SCsensor, Destruct_SCsensor
+   use SCsensorClass, only: SCsensor_t, Set_SCsensor, Destruct_SCsensor, GetSensedVariable_0D
 
    implicit none
 
@@ -138,6 +138,15 @@ module ShockCapturing
    real(RP) :: SCdev_sqrtAlpha2(2)   = 0.0_RP
    real(RP) :: SCdev_sqrtMu2Alpha(2) = 0.0_RP
 !
+!  Sensor: the parameters of the sensors computed on the device, and the sensor of
+!  every element in one array, so that it moves between host and device at once
+   integer  :: SCdev_sensType = 0
+   integer  :: SCdev_sVar     = 0
+   real(RP) :: SCdev_s0       = 0.0_RP
+   real(RP) :: SCdev_ds       = 1.0_RP
+   real(RP) :: SCdev_ds2      = 0.5_RP
+   real(RP), allocatable :: SCdev_sensor(:)
+!
 !  copyin, so that the defaults reach the device also when
 !  Initialize_ShockCapturing is not called (Euler)
 !
@@ -146,6 +155,8 @@ module ShockCapturing
    !$acc declare copyin(SCdev_mu1, SCdev_mu2, SCdev_smagC, SCdev_smagWallModel)
    !$acc declare copyin(SCdev_isSVV, SCdev_alphaPropMu, SCdev_sqrtMu1, SCdev_sqrtMu2)
    !$acc declare copyin(SCdev_sqrtAlpha1, SCdev_sqrtAlpha2, SCdev_sqrtMu2Alpha)
+   !$acc declare copyin(SCdev_sensType, SCdev_sVar, SCdev_s0, SCdev_ds, SCdev_ds2)
+   !$acc declare create(SCdev_sensor)
 
    public :: SCdev_isActive
    public :: SC_ComputeElementAviscFlux, SC_ProlongAviscFluxToFaces
@@ -280,6 +291,7 @@ module ShockCapturing
 !     ----------------
       call Set_SCsensor(self % sensor, controlVariables, sem, minSteps, &
                         TimeDerivative, TimeDerivativeIsolated)
+      allocate(SCdev_sensor(sem % mesh % no_of_elements))
 !
 !     Flatten the configuration for the device
 !     ----------------------------------------
@@ -298,12 +310,22 @@ module ShockCapturing
       type(SCdriver_t), intent(in) :: self
 
       SCdev_isActive = self % isActive
+      if (self % isActive) then
+         SCdev_sensType = self % sensor % sens_type
+         if (SCdev_sensType == SC_INTEGRAL_ID .or. SCdev_sensType == SC_INTEGRAL_SQRT_ID) then
+            SCdev_sVar = self % sensor % sVar
+            SCdev_s0   = self % sensor % s0
+            SCdev_ds   = self % sensor % ds
+            SCdev_ds2  = self % sensor % ds2
+         end if
+      end if
 
       !$acc update device(SCdev_isActive)
       !$acc update device(SCdev_hasMethod, SCdev_update, SCdev_fluxType)
       !$acc update device(SCdev_mu1, SCdev_mu2, SCdev_smagC, SCdev_smagWallModel)
       !$acc update device(SCdev_isSVV, SCdev_alphaPropMu, SCdev_sqrtMu1, SCdev_sqrtMu2)
       !$acc update device(SCdev_sqrtAlpha1, SCdev_sqrtAlpha2, SCdev_sqrtMu2Alpha)
+      !$acc update device(SCdev_sensType, SCdev_sVar, SCdev_s0, SCdev_ds, SCdev_ds2)
 
    end subroutine SC_SyncDeviceConfig
 !
@@ -311,7 +333,7 @@ module ShockCapturing
 !
    subroutine SC_UpdateSensorOnDevice(mesh)
 !
-!     The sensor is computed on the host
+!     The host sensor goes to the device in one transfer
 !
       implicit none
       type(HexMesh), intent(in) :: mesh
@@ -320,11 +342,70 @@ module ShockCapturing
       if (.not. SCdev_isActive) return
 
       do eID = 1, size(mesh % elements)
-         !$acc update device(mesh % elements(eID) % storage % sensor) async(1)
+         SCdev_sensor(eID) = mesh % elements(eID) % storage % sensor
       end do
+      !$acc update device(SCdev_sensor)
+
+      !$acc parallel loop present(mesh) async(1)
+      do eID = 1, size(mesh % elements)
+         mesh % elements(eID) % storage % sensor = SCdev_sensor(eID)
+      end do
+      !$acc end parallel loop
       !$acc wait(1)
 
    end subroutine SC_UpdateSensorOnDevice
+!
+!///////////////////////////////////////////////////////////////////////////////
+!
+   subroutine SC_ComputeSensorOnDevice(mesh)
+!
+!     Integral sensors (with or without sqrt), as Sensor_integral and
+!     Sensor_integral_sqrt, on the device; the result is copied to the host
+!
+      implicit none
+      type(HexMesh), intent(inout) :: mesh
+      integer  :: eID, i, j, k
+      real(RP) :: val, dev, s
+
+      !$acc wait
+      !$acc parallel loop gang present(mesh) private(val, dev, s) async(1)
+      do eID = 1, size(mesh % elements)
+         val = 0.0_RP
+         !$acc loop vector collapse(3) reduction(+:val)
+         do k = 0, mesh % elements(eID) % Nxyz(3) ; do j = 0, mesh % elements(eID) % Nxyz(2) ; do i = 0, mesh % elements(eID) % Nxyz(1)
+            val = val + NodalStorage(mesh % elements(eID) % Nxyz(1)) % w(i) &
+                      * NodalStorage(mesh % elements(eID) % Nxyz(2)) % w(j) &
+                      * NodalStorage(mesh % elements(eID) % Nxyz(3)) % w(k) &
+                      * mesh % elements(eID) % geom % jacobian(i,j,k)       &
+                      * GetSensedVariable_0D(SCdev_sVar,                    &
+                                             mesh % elements(eID) % storage % Q(:,i,j,k),   &
+                                             mesh % elements(eID) % storage % U_x(:,i,j,k), &
+                                             mesh % elements(eID) % storage % U_y(:,i,j,k), &
+                                             mesh % elements(eID) % storage % U_z(:,i,j,k))
+         end do                ; end do                ; end do
+         if (SCdev_sensType == SC_INTEGRAL_SQRT_ID) val = sqrt(val)
+!
+!        SinRamp
+         dev = val - SCdev_s0
+         if (dev <= -SCdev_ds2) then
+            s = 0.0_RP
+         elseif (dev >= SCdev_ds2) then
+            s = 1.0_RP
+         else
+            s = ( 1.0_RP + sin(PI * dev / SCdev_ds) ) / 2.0_RP
+         end if
+         mesh % elements(eID) % storage % sensor = s
+         SCdev_sensor(eID) = s
+      end do
+      !$acc end parallel loop
+      !$acc wait(1)
+      !$acc update self(SCdev_sensor)
+
+      do eID = 1, size(mesh % elements)
+         mesh % elements(eID) % storage % sensor = SCdev_sensor(eID)
+      end do
+
+   end subroutine SC_ComputeSensorOnDevice
 !
 !///////////////////////////////////////////////////////////////////////////////
 !
@@ -345,10 +426,32 @@ module ShockCapturing
 !
 !     The sensor runs on the host
 !     ---------------------------
-      call sem % mesh % UpdateHostData()
+      select case (self % sensor % sens_type)
+      case (SC_ZERO_ID, SC_ONE_ID)
+!
+!        These read nothing from the solution
+!        ------------------------------------
+         call self % sensor % Compute(sem, t)
+         call SC_UpdateSensorOnDevice(sem % mesh)
 
-      call self % sensor % Compute(sem, t)
-      call SC_UpdateSensorOnDevice(sem % mesh)
+      case (SC_INTEGRAL_ID, SC_INTEGRAL_SQRT_ID)
+!
+!        Computed on the device; the host gets a copy (inertia, monitors, output)
+!        ------------------------------------------------------------------------
+         call SC_ComputeSensorOnDevice(sem % mesh)
+         if (self % sensor % min_steps > 1) then
+            call self % sensor % ApplyInertia(sem)
+            call SC_UpdateSensorOnDevice(sem % mesh)
+         end if
+
+      case default
+!
+!        The other sensors run on the host
+!        ---------------------------------
+         call sem % mesh % UpdateHostData()
+         call self % sensor % Compute(sem, t)
+         call SC_UpdateSensorOnDevice(sem % mesh)
+      end select
 
    end subroutine SC_detect
 !
@@ -923,6 +1026,7 @@ module ShockCapturing
       self%isActive = .false.
 
       call Destruct_SCsensor(self % sensor)
+      if (allocated(SCdev_sensor)) deallocate(SCdev_sensor)
 
       if (allocated(self % method1)) deallocate(self % method1)
       if (allocated(self % method2)) deallocate(self % method2)
