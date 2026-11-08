@@ -82,6 +82,9 @@ module StorageClass
       real(kind=RP),           allocatable :: S_NS(:,:,:,:)        ! NSE source term
       real(kind=RP),           allocatable :: S_NSP(:,:,:,:)       ! NSE Particles source term
       real(kind=RP),           allocatable :: Q_grad(:,:,:,:)      ! Gradient variables U(Q) to calculate the gradient (not used for GRADVARS_STATE)
+#ifdef NAVIERSTOKES
+      real(kind=RP), dimension(:,:,:,:,:), allocatable :: AviscContravariantFlux ! Shock-capturing artificial viscous flux
+#endif
 #ifndef ACOUSTIC
       real(kind=RP),           allocatable :: mu_NS(:,:,:,:)       ! (mu, beta, kappa) artificial
       real(kind=RP),           allocatable :: mu_turb_NS(:,:,:)    ! mu of LES
@@ -894,6 +897,9 @@ module StorageClass
          self % FluxH    = 0.0_RP
          self % contravariantFlux    = 0.0_RP
          self % rho    = 0.0_RP
+#ifdef NAVIERSTOKES
+         if (allocated(self % AviscContravariantFlux)) self % AviscContravariantFlux = 0.0_RP
+#endif
 #ifndef ACOUSTIC
          self % mu_NS  = 0.0_RP
          self % mu_turb_NS  = 0.0_RP
@@ -1011,6 +1017,9 @@ module StorageClass
          to % G_NS   = from % G_NS
          to % S_NS   = from % S_NS
          to % S_NSP  = from % S_NSP
+#ifdef NAVIERSTOKES
+         if (allocated(from % AviscContravariantFlux)) to % AviscContravariantFlux = from % AviscContravariantFlux
+#endif
 #if defined (SPALARTALMARAS)
          to % S_SA   = from % S_SA
 #endif
@@ -1113,6 +1122,9 @@ module StorageClass
          safedeallocate(self % S_NS)
          safedeallocate(self % S_NSP)
 
+#ifdef NAVIERSTOKES
+         safedeallocate(self % AviscContravariantFlux)
+#endif
 #if defined (SPALARTALMARAS)
          safedeallocate(self % S_SA)
 #endif

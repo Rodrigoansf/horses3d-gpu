@@ -7,12 +7,15 @@ module ShockCapturing
    use Utilities,                  only: toLower
    use DGSEMClass,                 only: ComputeTimeDerivative_f, DGSem
    use HexMeshClass,               only: HexMesh
-   use ElementClass,               only: Element
+   use ElementClass,               only: Element, HexElement_ProlongAviscToFaces
 #if !defined(SPALARTALMARAS)
    use LESModels,                  only: Smagorinsky_t, Smagorinsky_ComputeViscosity
 #endif
-   use SpectralVanishingViscosity, only: SVV, InitializeSVV
+   use SpectralVanishingViscosity, only: SVV, InitializeSVV, SVVdev_filter, SVVdev_kind, SVVdev_lowPass, &
+                                         SVVdev_W, SVVdev_mu, SVVdev_diss, SVV_PHYS_ENERGY,              &
+                                         SVV_Hflux_0D, SVV_Flux_0D
    use DGIntegrals,                only: ScalarWeakIntegrals, ScalarStrongIntegrals
+   use NodalStorageClass,          only: NodalStorage
 
    use ShockCapturingKeywords
    use SCsensorClass, only: SCsensor_t, Set_SCsensor, Destruct_SCsensor
@@ -113,6 +116,41 @@ module ShockCapturing
 
    type(SCdriver_t), allocatable :: ShockCapturingDriver
 !
+!  Flat copy of the configuration for the device kernels, indexed by region
+!  (1: first method, 2: second method): polymorphic components and procedure
+!  pointers cannot be used in OpenACC compute regions.
+!
+   logical  :: SCdev_isActive        = .false.
+   logical  :: SCdev_hasMethod(2)    = .false.
+   integer  :: SCdev_update(2)       = SC_CONST_ID
+   integer  :: SCdev_fluxType(2)     = SC_PHYS_ID
+   real(RP) :: SCdev_mu1(2)          = 0.0_RP
+   real(RP) :: SCdev_mu2(2)          = 0.0_RP
+   real(RP) :: SCdev_smagC(2)        = 0.0_RP
+   integer  :: SCdev_smagWallModel(2) = 0
+!
+!  SVV only (the filter itself is in SpectralVanishingViscosity)
+   logical  :: SCdev_isSVV(2)        = .false.
+   logical  :: SCdev_alphaPropMu(2)  = .false.
+   real(RP) :: SCdev_sqrtMu1(2)      = 0.0_RP
+   real(RP) :: SCdev_sqrtMu2(2)      = 0.0_RP
+   real(RP) :: SCdev_sqrtAlpha1(2)   = 0.0_RP
+   real(RP) :: SCdev_sqrtAlpha2(2)   = 0.0_RP
+   real(RP) :: SCdev_sqrtMu2Alpha(2) = 0.0_RP
+!
+!  copyin, so that the defaults reach the device also when
+!  Initialize_ShockCapturing is not called (Euler)
+!
+   !$acc declare copyin(SCdev_isActive)
+   !$acc declare copyin(SCdev_hasMethod, SCdev_update, SCdev_fluxType)
+   !$acc declare copyin(SCdev_mu1, SCdev_mu2, SCdev_smagC, SCdev_smagWallModel)
+   !$acc declare copyin(SCdev_isSVV, SCdev_alphaPropMu, SCdev_sqrtMu1, SCdev_sqrtMu2)
+   !$acc declare copyin(SCdev_sqrtAlpha1, SCdev_sqrtAlpha2, SCdev_sqrtMu2Alpha)
+
+   public :: SCdev_isActive
+   public :: SC_ComputeElementAviscFlux, SC_ProlongAviscFluxToFaces
+   public :: SC_UpdateSensorOnDevice, SC_UpdateHostArtificialDiss
+!
 !  ========
    contains
 !  ========
@@ -160,6 +198,10 @@ module ShockCapturing
       end if
 
       if (.not. self % isActive) then
+!
+!        Push the defaults to the device
+!        -------------------------------
+         call SC_SyncDeviceConfig(self)
          return
       end if
 !
@@ -238,8 +280,51 @@ module ShockCapturing
 !     ----------------
       call Set_SCsensor(self % sensor, controlVariables, sem, minSteps, &
                         TimeDerivative, TimeDerivativeIsolated)
+!
+!     Flatten the configuration for the device
+!     ----------------------------------------
+      call SC_SyncDeviceConfig(self)
 
    end subroutine Initialize_ShockCapturing
+!
+!///////////////////////////////////////////////////////////////////////////////
+!
+   subroutine SC_SyncDeviceConfig(self)
+!
+!     Push the flat configuration, filled by the methods' initializers, to
+!     the device
+!
+      implicit none
+      type(SCdriver_t), intent(in) :: self
+
+      SCdev_isActive = self % isActive
+
+      !$acc update device(SCdev_isActive)
+      !$acc update device(SCdev_hasMethod, SCdev_update, SCdev_fluxType)
+      !$acc update device(SCdev_mu1, SCdev_mu2, SCdev_smagC, SCdev_smagWallModel)
+      !$acc update device(SCdev_isSVV, SCdev_alphaPropMu, SCdev_sqrtMu1, SCdev_sqrtMu2)
+      !$acc update device(SCdev_sqrtAlpha1, SCdev_sqrtAlpha2, SCdev_sqrtMu2Alpha)
+
+   end subroutine SC_SyncDeviceConfig
+!
+!///////////////////////////////////////////////////////////////////////////////
+!
+   subroutine SC_UpdateSensorOnDevice(mesh)
+!
+!     The sensor is computed on the host
+!
+      implicit none
+      type(HexMesh), intent(in) :: mesh
+      integer :: eID
+
+      if (.not. SCdev_isActive) return
+
+      do eID = 1, size(mesh % elements)
+         !$acc update device(mesh % elements(eID) % storage % sensor) async(1)
+      end do
+      !$acc wait(1)
+
+   end subroutine SC_UpdateSensorOnDevice
 !
 !///////////////////////////////////////////////////////////////////////////////
 !
@@ -257,8 +342,13 @@ module ShockCapturing
       type(DGSem),       intent(inout) :: sem
       real(RP),          intent(in)    :: t
 
+!
+!     The sensor runs on the host
+!     ---------------------------
+      call sem % mesh % UpdateHostData()
 
       call self % sensor % Compute(sem, t)
+      call SC_UpdateSensorOnDevice(sem % mesh)
 
    end subroutine SC_detect
 !
@@ -309,6 +399,477 @@ module ShockCapturing
       end if
 
    end subroutine SC_viscosity
+!
+!///////////////////////////////////////////////////////////////////////////////
+!
+   pure subroutine SC_ArtificialViscousFlux_0D(region, Q, Q_x, Q_y, Q_z, mu, beta, kappa, F)
+!
+!     Device version of the ViscousFlux procedure pointer of SC_NoSVV_t
+!
+      !$acc routine seq
+      use Physics,        only: GuermondPopovFlux_ENTROPY, ViscousFlux_STATE, &
+                                ViscousFlux_ENTROPY, ViscousFlux_ENERGY
+      use PhysicsStorage, only: grad_vars, GRADVARS_ENTROPY, GRADVARS_ENERGY
+      implicit none
+      integer,       intent(in)  :: region
+      real(kind=RP), intent(in)  :: Q   (1:NCONS)
+      real(kind=RP), intent(in)  :: Q_x (1:NGRAD)
+      real(kind=RP), intent(in)  :: Q_y (1:NGRAD)
+      real(kind=RP), intent(in)  :: Q_z (1:NGRAD)
+      real(kind=RP), intent(in)  :: mu, beta, kappa
+      real(kind=RP), intent(out) :: F   (1:NCONS, 1:NDIM)
+
+      select case (SCdev_fluxType(region))
+      case (SC_GP_ID)
+         call GuermondPopovFlux_ENTROPY(NCONS, NGRAD, Q, Q_x, Q_y, Q_z, mu, beta, kappa, F)
+      case default
+         select case (grad_vars)
+         case (GRADVARS_ENTROPY)
+            call ViscousFlux_ENTROPY(NCONS, NGRAD, Q, Q_x, Q_y, Q_z, mu, beta, kappa, F)
+         case (GRADVARS_ENERGY)
+            call ViscousFlux_ENERGY(NCONS, NGRAD, Q, Q_x, Q_y, Q_z, mu, beta, kappa, F)
+         case default
+            call ViscousFlux_STATE(NCONS, NGRAD, Q, Q_x, Q_y, Q_z, mu, beta, kappa, F)
+         end select
+      end select
+
+   end subroutine SC_ArtificialViscousFlux_0D
+!
+!///////////////////////////////////////////////////////////////////////////////
+!
+   subroutine SC_ComputeElementAviscFlux(e, eID)
+!
+!     Device version of SC_viscosity and NoSVV_viscosity for one element. The
+!     flux is prolonged to the faces by SC_ProlongAviscFluxToFaces.
+!
+      !$acc routine vector
+#if !defined (SPALARTALMARAS)
+      use LESModels, only: Smagorinsky_ComputeViscosity
+#endif
+      implicit none
+      type(Element), intent(inout) :: e
+      integer,       intent(in)    :: eID
+!
+!     ---------------
+!     Local variables
+!     ---------------
+      integer       :: i, j, k, eq, region
+      real(kind=RP) :: switch, mu, kappa, delta
+      real(kind=RP) :: covariantFlux(1:NCONS, 1:NDIM)
+
+      switch = e % storage % sensor
+!
+!     Pick the region exactly as SC_viscosity does
+!     --------------------------------------------
+      region = 0
+      if (switch >= 1.0_RP) then
+         if (SCdev_hasMethod(2)) region = 2
+      elseif (switch > 0.0_RP) then
+         if (SCdev_hasMethod(1)) region = 1
+      end if
+
+      if (region /= 0) then
+         if (SCdev_isSVV(region)) then
+            call SC_ComputeElementSVVFlux(e, eID, region, switch)
+            return
+         end if
+      end if
+
+      if (region == 0) then
+
+         !$acc loop vector collapse(3)
+         do k = 0, e % Nxyz(3) ; do j = 0, e % Nxyz(2) ; do i = 0, e % Nxyz(1)
+            !$acc loop seq
+            do eq = 1, NCONS
+               e % storage % AviscContravariantFlux(eq,i,j,k,IX) = 0.0_RP
+               e % storage % AviscContravariantFlux(eq,i,j,k,IY) = 0.0_RP
+               e % storage % AviscContravariantFlux(eq,i,j,k,IZ) = 0.0_RP
+            end do
+         end do                ; end do                ; end do
+         e % storage % artificialDiss = 0.0_RP
+         if (SCdev_isSVV(1)) SVVdev_diss(eID) = 0.0_RP
+
+      else
+
+         delta = ( e % geom % Volume                                            &
+                 / real((e % Nxyz(1)+1)*(e % Nxyz(2)+1)*(e % Nxyz(3)+1), RP) )  &
+                 ** (1.0_RP / 3.0_RP)
+!
+!     Viscosity and flux, node by node
+!     --------------------------------
+      !$acc loop vector collapse(3) private(covariantFlux, mu, kappa)
+      do k = 0, e % Nxyz(3) ; do j = 0, e % Nxyz(2) ; do i = 0, e % Nxyz(1)
+
+         select case (SCdev_update(region))
+         case (SC_SENSOR_ID)
+            mu = (SCdev_mu1(region) * (1.0_RP-switch) + SCdev_mu2(region) * switch) * e % hn
+
+#if !defined (SPALARTALMARAS)
+         case (SC_SMAG_ID)
+            call Smagorinsky_ComputeViscosity(delta, e % geom % dWall(i,j,k), &
+                                              e % storage % Q(:,i,j,k),       &
+                                              e % storage % U_x(:,i,j,k),     &
+                                              e % storage % U_y(:,i,j,k),     &
+                                              e % storage % U_z(:,i,j,k),     &
+                                              mu,                             &
+                                              SCdev_smagC(region),            &
+                                              SCdev_smagWallModel(region))
+#endif
+
+         case default   ! SC_CONST_ID
+            if (switch >= 1.0_RP) then
+               mu = SCdev_mu2(region) * e % hn
+            else
+               mu = SCdev_mu1(region) * e % hn
+            end if
+
+         end select
+
+         kappa = dimensionless % mu_to_kappa * mu
+
+         call SC_ArtificialViscousFlux_0D(region, e % storage % Q(:,i,j,k),   &
+                                          e % storage % U_x(:,i,j,k),         &
+                                          e % storage % U_y(:,i,j,k),         &
+                                          e % storage % U_z(:,i,j,k),         &
+                                          mu, 0.0_RP, kappa, covariantFlux)
+
+         !$acc loop seq
+         do eq = 1, NCONS
+            e % storage % AviscContravariantFlux(eq,i,j,k,IX) =                       &
+                 covariantFlux(eq,IX) * e % geom % jGradXi(IX,i,j,k)                  &
+               + covariantFlux(eq,IY) * e % geom % jGradXi(IY,i,j,k)                  &
+               + covariantFlux(eq,IZ) * e % geom % jGradXi(IZ,i,j,k)
+
+            e % storage % AviscContravariantFlux(eq,i,j,k,IY) =                       &
+                 covariantFlux(eq,IX) * e % geom % jGradEta(IX,i,j,k)                 &
+               + covariantFlux(eq,IY) * e % geom % jGradEta(IY,i,j,k)                 &
+               + covariantFlux(eq,IZ) * e % geom % jGradEta(IZ,i,j,k)
+
+            e % storage % AviscContravariantFlux(eq,i,j,k,IZ) =                       &
+                 covariantFlux(eq,IX) * e % geom % jGradZeta(IX,i,j,k)                &
+               + covariantFlux(eq,IY) * e % geom % jGradZeta(IY,i,j,k)                &
+               + covariantFlux(eq,IZ) * e % geom % jGradZeta(IZ,i,j,k)
+         end do
+
+      end do                ; end do                ; end do
+
+      end if
+
+   end subroutine SC_ComputeElementAviscFlux
+
+!
+!///////////////////////////////////////////////////////////////////////////////
+!
+   subroutine SC_ComputeElementSVVFlux(e, eID, region, switch)
+!
+!     Device version of SVV_viscosity for one element: H = sqrt(J) Hflux is
+!     filtered in xi, eta and zeta, with SVVdev_W and AviscContravariantFlux
+!     taking turns as scratch. Q and its gradients are copied to local arrays,
+!     and there is no USE here: otherwise gfortran makes a temporary, or saves
+!     the FP state, at every call.
+!
+      !$acc routine vector
+      implicit none
+      type(Element), intent(inout) :: e
+      integer,       intent(in)    :: eID
+      integer,       intent(in)    :: region
+      real(kind=RP), intent(in)    :: switch
+!
+!     ---------------
+!     Local variables
+!     ---------------
+      integer       :: i, j, k, l, eq, dir, Nx, Ny, Nz, eqMin, eqMax
+      real(kind=RP) :: delta, sqrt_mu, sqrt_alpha, sqrtJ, f, dissNode, SVV_diss
+      real(kind=RP) :: Qn(1:NCONS), Uxn(1:NGRAD), Uyn(1:NGRAD), Uzn(1:NGRAD)
+      real(kind=RP) :: H(1:NCONS, 1:NDIM)
+      real(kind=RP) :: Hf(1:NCONS, 1:NDIM)
+      real(kind=RP) :: cartesianFlux(1:NCONS, 1:NDIM)
+
+      Nx = e % Nxyz(1) ; Ny = e % Nxyz(2) ; Nz = e % Nxyz(3)
+
+      delta = ( e % geom % Volume / real((Nx+1)*(Ny+1)*(Nz+1), RP) ) ** (1.0_RP / 3.0_RP)
+!
+!     Variables entering the dissipation estimate (SVV % entropy_indexes)
+!     -------------------------------------------------------------------
+      if (SVVdev_kind == SVV_PHYS_ENERGY) then
+         eqMin = 2 ; eqMax = 4
+      else
+         eqMin = 1 ; eqMax = 5
+      end if
+!
+!     Unfiltered H, scaled with sqrt(J)
+!     ---------------------------------
+      !$acc loop vector collapse(3) private(Qn, Uxn, Uyn, Uzn, H, sqrt_mu, sqrt_alpha, sqrtJ)
+      do k = 0, Nz ; do j = 0, Ny ; do i = 0, Nx
+         call SC_SVVGetNode(e, i, j, k, Qn, Uxn, Uyn, Uzn)
+         call SC_SVVViscosity_0D(region, switch, e % hn, delta, e % geom % dWall(i,j,k), &
+                                 Qn, Uxn, Uyn, Uzn, sqrt_mu, sqrt_alpha)
+         SVVdev_mu(1,i,j,k,eID) = sqrt_mu
+         SVVdev_mu(2,i,j,k,eID) = sqrt_alpha
+         call SVV_Hflux_0D(Qn, Uxn, Uyn, Uzn, sqrt_mu, sqrt_alpha, H(:,IX), H(:,IY), H(:,IZ))
+         sqrtJ = sqrt(e % geom % jacobian(i,j,k))
+         !$acc loop seq
+         do dir = 1, NDIM
+            !$acc loop seq
+            do eq = 1, NCONS
+               SVVdev_W(eq,i,j,k,dir,eID) = sqrtJ * H(eq,dir)
+            end do
+         end do
+      end do       ; end do       ; end do
+!
+!     Filter in xi
+!     ------------
+      !$acc loop vector collapse(3) private(Hf, f)
+      do k = 0, Nz ; do j = 0, Ny ; do i = 0, Nx
+         Hf = 0.0_RP
+         !$acc loop seq
+         do l = 0, Nx
+            f = SVVdev_filter(i,l,Nx)
+            !$acc loop seq
+            do dir = 1, NDIM
+               !$acc loop seq
+               do eq = 1, NCONS
+                  Hf(eq,dir) = Hf(eq,dir) + f * SVVdev_W(eq,l,j,k,dir,eID)
+               end do
+            end do
+         end do
+         !$acc loop seq
+         do dir = 1, NDIM
+            !$acc loop seq
+            do eq = 1, NCONS
+               e % storage % AviscContravariantFlux(eq,i,j,k,dir) = Hf(eq,dir)
+            end do
+         end do
+      end do       ; end do       ; end do
+!
+!     Filter in eta
+!     -------------
+      !$acc loop vector collapse(3) private(Hf, f)
+      do k = 0, Nz ; do j = 0, Ny ; do i = 0, Nx
+         Hf = 0.0_RP
+         !$acc loop seq
+         do l = 0, Ny
+            f = SVVdev_filter(j,l,Ny)
+            !$acc loop seq
+            do dir = 1, NDIM
+               !$acc loop seq
+               do eq = 1, NCONS
+                  Hf(eq,dir) = Hf(eq,dir) + f * e % storage % AviscContravariantFlux(eq,i,l,k,dir)
+               end do
+            end do
+         end do
+         !$acc loop seq
+         do dir = 1, NDIM
+            !$acc loop seq
+            do eq = 1, NCONS
+               SVVdev_W(eq,i,j,k,dir,eID) = Hf(eq,dir)
+            end do
+         end do
+      end do       ; end do       ; end do
+!
+!     Filter in zeta, then the SVV flux
+!     ---------------------------------
+      SVV_diss = 0.0_RP
+      !$acc loop vector collapse(3) reduction(+:SVV_diss) &
+      !$acc private(Qn, Uxn, Uyn, Uzn, H, Hf, cartesianFlux, sqrt_mu, sqrt_alpha, sqrtJ, f, dissNode)
+      do k = 0, Nz ; do j = 0, Ny ; do i = 0, Nx
+         Hf = 0.0_RP
+         !$acc loop seq
+         do l = 0, Nz
+            f = SVVdev_filter(k,l,Nz)
+            !$acc loop seq
+            do dir = 1, NDIM
+               !$acc loop seq
+               do eq = 1, NCONS
+                  Hf(eq,dir) = Hf(eq,dir) + f * SVVdev_W(eq,i,j,l,dir,eID)
+               end do
+            end do
+         end do
+
+         call SC_SVVGetNode(e, i, j, k, Qn, Uxn, Uyn, Uzn)
+         sqrt_mu    = SVVdev_mu(1,i,j,k,eID)
+         sqrt_alpha = SVVdev_mu(2,i,j,k,eID)
+
+         if (SVVdev_lowPass) then
+            call SVV_Hflux_0D(Qn, Uxn, Uyn, Uzn, sqrt_mu, sqrt_alpha, H(:,IX), H(:,IY), H(:,IZ))
+            sqrtJ = sqrt(e % geom % jacobian(i,j,k))
+            !$acc loop seq
+            do dir = 1, NDIM
+               !$acc loop seq
+               do eq = 1, NCONS
+                  Hf(eq,dir) = sqrtJ * H(eq,dir) - Hf(eq,dir)
+               end do
+            end do
+         end if
+
+         call SVV_Flux_0D(Qn, Hf(:,IX), Hf(:,IY), Hf(:,IZ), sqrt_mu, sqrt_alpha, cartesianFlux)
+
+         sqrtJ = sqrt(e % geom % invJacobian(i,j,k))
+         !$acc loop seq
+         do dir = 1, NDIM
+            !$acc loop seq
+            do eq = 1, NCONS
+               cartesianFlux(eq,dir) = sqrtJ * cartesianFlux(eq,dir)
+            end do
+         end do
+!
+!        Dissipation estimate
+!        --------------------
+         dissNode = 0.0_RP
+         !$acc loop seq
+         do eq = eqMin, eqMax
+            dissNode = dissNode + ( Uxn(eq) * cartesianFlux(eq,IX) &
+                                  + Uyn(eq) * cartesianFlux(eq,IY) &
+                                  + Uzn(eq) * cartesianFlux(eq,IZ) )
+         end do
+         SVV_diss = SVV_diss + NodalStorage(Nx) % w(i) * NodalStorage(Ny) % w(j) * NodalStorage(Nz) % w(k) &
+                             * dissNode * e % geom % jacobian(i,j,k)
+!
+!        Contravariant flux
+!        ------------------
+         !$acc loop seq
+         do eq = 1, NCONS
+            e % storage % AviscContravariantFlux(eq,i,j,k,IX) =                       &
+                 cartesianFlux(eq,IX) * e % geom % jGradXi(IX,i,j,k)                  &
+               + cartesianFlux(eq,IY) * e % geom % jGradXi(IY,i,j,k)                  &
+               + cartesianFlux(eq,IZ) * e % geom % jGradXi(IZ,i,j,k)
+
+            e % storage % AviscContravariantFlux(eq,i,j,k,IY) =                       &
+                 cartesianFlux(eq,IX) * e % geom % jGradEta(IX,i,j,k)                 &
+               + cartesianFlux(eq,IY) * e % geom % jGradEta(IY,i,j,k)                 &
+               + cartesianFlux(eq,IZ) * e % geom % jGradEta(IZ,i,j,k)
+
+            e % storage % AviscContravariantFlux(eq,i,j,k,IZ) =                       &
+                 cartesianFlux(eq,IX) * e % geom % jGradZeta(IX,i,j,k)                &
+               + cartesianFlux(eq,IY) * e % geom % jGradZeta(IY,i,j,k)                &
+               + cartesianFlux(eq,IZ) * e % geom % jGradZeta(IZ,i,j,k)
+         end do
+
+      end do       ; end do       ; end do
+
+      e % storage % artificialDiss = SVV_diss
+      SVVdev_diss(eID)             = SVV_diss
+
+   end subroutine SC_ComputeElementSVVFlux
+!
+!///////////////////////////////////////////////////////////////////////////////
+!
+   subroutine SC_SVVViscosity_0D(region, switch, hn, delta, dWall, Q, Ux, Uy, Uz, sqrt_mu, sqrt_alpha)
+!
+!     sqrt(mu) and sqrt(alpha) at one node, as in SVV_viscosity (alpha is zero
+!     where SVV_viscosity leaves it undefined)
+!
+      !$acc routine seq
+      implicit none
+      integer,       intent(in)  :: region
+      real(kind=RP), intent(in)  :: switch, hn, delta, dWall
+      real(kind=RP), intent(in)  :: Q(1:NCONS), Ux(1:NGRAD), Uy(1:NGRAD), Uz(1:NGRAD)
+      real(kind=RP), intent(out) :: sqrt_mu, sqrt_alpha
+!
+!     ---------------
+!     Local variables
+!     ---------------
+      real(kind=RP) :: salpha
+
+      sqrt_mu = 0.0_RP
+      salpha  = 0.0_RP
+
+      select case (SCdev_update(region))
+      case (SC_CONST_ID)
+         if (switch >= 1.0_RP) then
+            sqrt_mu = SCdev_sqrtMu2(region)    * hn
+            salpha  = SCdev_sqrtAlpha2(region) * hn
+         else
+            sqrt_mu = SCdev_sqrtMu1(region)    * hn
+            salpha  = SCdev_sqrtAlpha1(region) * hn
+         end if
+
+      case (SC_SENSOR_ID)
+         sqrt_mu = (SCdev_sqrtMu1(region)    * (1.0_RP-switch) + SCdev_sqrtMu2(region)    * switch) * hn
+         salpha  = (SCdev_sqrtAlpha1(region) * (1.0_RP-switch) + SCdev_sqrtAlpha2(region) * switch) * hn
+
+#if !defined (SPALARTALMARAS)
+      case (SC_SMAG_ID)
+         call Smagorinsky_ComputeViscosity(delta, dWall, Q, Ux, Uy, Uz, sqrt_mu, &
+                                           SCdev_smagC(region), SCdev_smagWallModel(region))
+         sqrt_mu = sqrt(sqrt_mu)
+#endif
+
+      end select
+
+      if (SCdev_alphaPropMu(region)) then
+         sqrt_alpha = SCdev_sqrtMu2Alpha(region) * sqrt_mu
+      else
+         sqrt_alpha = salpha
+      end if
+
+   end subroutine SC_SVVViscosity_0D
+!
+!///////////////////////////////////////////////////////////////////////////////
+!
+   subroutine SC_SVVGetNode(e, i, j, k, Q, Ux, Uy, Uz)
+!
+!     Q and the gradients of node (i,j,k) as contiguous arrays
+!
+      !$acc routine seq
+      implicit none
+      type(Element), intent(in)  :: e
+      integer,       intent(in)  :: i, j, k
+      real(kind=RP), intent(out) :: Q(1:NCONS), Ux(1:NGRAD), Uy(1:NGRAD), Uz(1:NGRAD)
+      integer :: eq
+
+      do eq = 1, NCONS
+         Q(eq) = e % storage % Q(eq,i,j,k)
+      end do
+      do eq = 1, NGRAD
+         Ux(eq) = e % storage % U_x(eq,i,j,k)
+         Uy(eq) = e % storage % U_y(eq,i,j,k)
+         Uz(eq) = e % storage % U_z(eq,i,j,k)
+      end do
+
+   end subroutine SC_SVVGetNode
+!
+!///////////////////////////////////////////////////////////////////////////////
+!
+   subroutine SC_UpdateHostArtificialDiss(mesh)
+!
+!     SVV dissipation of each element back to the host, for the monitors
+!
+      implicit none
+      type(HexMesh), intent(inout) :: mesh
+      integer :: eID
+
+      if (.not. SCdev_isSVV(1)) return
+
+      !$acc wait(1)
+      !$acc update self(SVVdev_diss)
+      do eID = 1, size(mesh % elements)
+         mesh % elements(eID) % storage % artificialDiss = SVVdev_diss(eID)
+      end do
+
+   end subroutine SC_UpdateHostArtificialDiss
+!
+!///////////////////////////////////////////////////////////////////////////////
+!
+   subroutine SC_ProlongAviscFluxToFaces(mesh)
+!
+!     Element AV flux to the faces, on the device. As HexMesh_ProlongSolToFaces,
+!     it handles rotated faces but not p-nonconforming ones.
+!
+      implicit none
+      type(HexMesh), intent(inout) :: mesh
+      integer :: eID, fID
+
+!$acc parallel loop gang collapse(2) present(mesh) num_gangs(size(mesh % elements)) vector_length(32) async(1)
+      do eID = 1, size(mesh % elements)
+         do fID = 1, 6
+            call HexElement_ProlongAviscToFaces(mesh % elements(eID), NCONS,                        &
+                                                mesh % faces(mesh % elements(eID) % faceIDs(fID)),  &
+                                                mesh % elements(eID) % storage % AviscContravariantFlux, fID)
+      end do ; end do
+!$acc end parallel loop
+
+   end subroutine SC_ProlongAviscFluxToFaces
 !
 !///////////////////////////////////////////////////////////////////////////////
 !
@@ -630,6 +1191,18 @@ module ShockCapturing
          end select
 
       end select
+!
+!     Flat copy for the device kernels (pushed by SC_SyncDeviceConfig)
+!     ---------------------------------------------------------------
+      SCdev_hasMethod(region) = .true.
+      SCdev_update(region)    = self % updateMethod
+      SCdev_fluxType(region)  = self % fluxType
+      SCdev_mu1(region)       = self % mu1
+      SCdev_mu2(region)       = self % mu2
+#if !defined (SPALARTALMARAS)
+      SCdev_smagC(region)         = self % Smagorinsky % C
+      SCdev_smagWallModel(region) = self % Smagorinsky % WallModel
+#endif
 
    end subroutine NoSVV_initialize
 !
@@ -866,6 +1439,25 @@ module ShockCapturing
 !     Start the SVV module
 !     --------------------
       call InitializeSVV(SVV, controlVariables, mesh)
+!
+!     Flat copy for the device kernels (pushed by SC_SyncDeviceConfig)
+!     ---------------------------------------------------------------
+      SCdev_hasMethod(region)   = .true.
+      SCdev_isSVV(region)       = .true.
+      SCdev_update(region)      = self % updateMethod
+      SCdev_sqrtMu1(region)     = self % sqrt_mu1
+      SCdev_sqrtMu2(region)     = self % sqrt_mu2
+      SCdev_alphaPropMu(region) = self % alphaIsPropToMu
+      if (self % alphaIsPropToMu) then
+         SCdev_sqrtMu2Alpha(region) = self % sqrt_mu2alpha
+      else
+         SCdev_sqrtAlpha1(region) = self % sqrt_alpha1
+         SCdev_sqrtAlpha2(region) = self % sqrt_alpha2
+      end if
+#if !defined (SPALARTALMARAS)
+      SCdev_smagC(region)         = self % Smagorinsky % C
+      SCdev_smagWallModel(region) = self % Smagorinsky % WallModel
+#endif
 
    end subroutine SVV_initialize
 !

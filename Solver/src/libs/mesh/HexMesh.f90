@@ -1109,6 +1109,7 @@ slavecoord:             DO l = 1, 4
          !-local-variables----------------------------------------------------
          integer            :: mpifID, fID, thisSide, domain
          integer            :: i, j, counter
+         integer            :: eIDmax
          !--------------------------------------------------------------------
 
          if ( .not. MPI_Process % doMPIAction ) return
@@ -1136,8 +1137,9 @@ slavecoord:             DO l = 1, 4
             do mpifID = 1, self % MPIfaces % faces(domain) % no_of_faces
                fID = self % MPIfaces % faces(domain) % faceIDs(mpifID)
                thisSide = self % MPIfaces % faces(domain) % elementSide(mpifID)
+               eIDmax = maxval(self % faces(fID) % elementIDs)   ! plain integer: nvfortran 26.3 ICEs on the expression inside the associate (MPI builds)
                associate( f => self % faces(fID))
-               associate( e => self % elements(maxval(f % elementIDs)) )
+               associate( e => self % elements(eIDmax) )
 
 
                self % MPIfaces % faces(domain) % Nsend(counter:counter+1  ) = e % Nxyz(axisMap(:,f % elementSide(thisSide)))
@@ -1314,6 +1316,11 @@ slavecoord:             DO l = 1, 4
             call self % MPIfaces % faces(domain) % RecvAviscFlux(domain, nEqn)
          end do
 !
+!        Wait for SC_ProlongAviscFluxToFaces (queue 1); this side of the MPI faces
+!        is sent to the host below
+!        -------------------------------------------------------------------------
+         !$acc wait(1)
+!
 !        ***********
 !        Send H flux
 !        ***********
@@ -1332,6 +1339,7 @@ slavecoord:             DO l = 1, 4
             do mpifID = 1, self % MPIfaces % faces(domain) % no_of_faces
                fID = self % MPIfaces % faces(domain) % faceIDs(mpifID)
                thisSide = self % MPIfaces % faces(domain) % elementSide(mpifID)
+               !$acc update self(self % faces(fID) % storage(thisSide) % AviscFlux)
                associate(f => self % faces(fID))
                do j = 0, f % Nf(2)  ; do i = 0, f % Nf(1)
                   self % MPIfaces % faces(domain) % AviscFluxSend(counter:counter+nEqn-1) = &
@@ -1576,6 +1584,10 @@ slavecoord:             DO l = 1, 4
                   counter = counter + nEqn
                end do               ; end do
                end associate
+!
+!              The neighbour's flux is used on the device
+!              ------------------------------------------
+               !$acc update device(self % faces(fID) % storage(otherSide(thisSide)) % AviscFlux)
             end do
          end do
 #endif
@@ -2243,6 +2255,7 @@ slavecoord:             DO l = 1, 4
          integer  :: Nxyz(NDIM)
          integer  :: domain, MPI_NDOFS(MPI_Process % nProcs), mpifID
          integer  :: num_of_Faces, ii
+         integer  :: eIDmax
          integer, parameter :: other(2) = [2, 1]
          !--------------------------------------------------------------
 
@@ -2339,8 +2352,9 @@ slavecoord:             DO l = 1, 4
                   fID  = self % MPIfaces % faces(domain) % faceIDs(mpifID)
                   side = self % MPIfaces % faces(domain) % elementSide(mpifID)   ! face side 1/2
 
+                  eIDmax = maxval(self % faces(fID) % elementIDs)   ! plain integer: nvfortran 26.3 ICEs on the expression inside the associate (MPI builds)
                   associate( f => self % faces(fID) )
-                  associate( e => self % elements(maxval(f % elementIDs)) )
+                  associate( e => self % elements(eIDmax) )
 
                   sideL = f % elementSide(side)                                  ! element side 1/2/3/4/5/6
 
@@ -4414,6 +4428,21 @@ slavecoord:             DO l = 1, 4
          e % storage => self % storage % elements(eID)
          end associate
       END DO
+#ifdef NAVIERSTOKES
+!
+!     Artificial viscous flux of the elements: shock capturing only
+!     -------------------------------------------------------------
+      if ( controlVariables % containsKey("enable shock-capturing") ) then
+         if ( controlVariables % logicalValueForKey("enable shock-capturing") ) then
+            do eID = 1, size(self % elements)
+               associate (e => self % elements(eID))
+               allocate(e % storage % AviscContravariantFlux(1:NCONS, 0:e % Nxyz(1), 0:e % Nxyz(2), 0:e % Nxyz(3), 1:NDIM))
+               e % storage % AviscContravariantFlux = 0.0_RP
+               end associate
+            end do
+         end if
+      end if
+#endif
 
    end subroutine HexMesh_AllocateStorage
 
@@ -4429,6 +4458,9 @@ slavecoord:             DO l = 1, 4
       !-----------------------------------------------------------
       integer :: eID
       integer     :: i, j, k, iFace, fID, zoneID, nZones
+#ifdef NAVIERSTOKES
+      logical     :: scOnDevice
+#endif
       !-----------------------------------------------------------
 #ifdef _OPENACC
       integer(kind=cuda_count_kind) :: heapsize 
@@ -4440,6 +4472,12 @@ slavecoord:             DO l = 1, 4
 #endif
  
       print*, "I allocate the device data"
+
+#ifdef NAVIERSTOKES
+!     The shock-capturing fluxes go to the device only in shock-capturing runs
+      scOnDevice = .false.
+      if (size(self % elements) > 0) scOnDevice = allocated(self % elements(1) % storage % AviscContravariantFlux)
+#endif
 
       !!$acc enter data copyin(self)
       !$acc update device(self)
@@ -4491,6 +4529,11 @@ slavecoord:             DO l = 1, 4
 #ifdef FLOW
          if (allocated(self % elements(eID) % storage % Q_grad)) then
             !$acc enter data copyin(self % elements(eID) % storage % Q_grad) ! Gradient variables to calculate the gradient
+         end if
+#endif
+#ifdef NAVIERSTOKES
+         if (allocated(self % elements(eID) % storage % AviscContravariantFlux)) then
+            !$acc enter data copyin(self % elements(eID) % storage % AviscContravariantFlux) !Shock-capturing artificial viscous flux
          end if
 #endif
 #ifdef CAHNHILLIARD
@@ -4549,6 +4592,12 @@ slavecoord:             DO l = 1, 4
          !$acc enter data copyin(self % faces(iFace) % storage(2) % unStar)
          !$acc enter data copyin(self % faces(iFace) % storage(1) % rho)
          !$acc enter data copyin(self % faces(iFace) % storage(2) % rho)
+#ifdef NAVIERSTOKES
+         if (scOnDevice) then
+            !$acc enter data copyin(self % faces(iFace) % storage(1) % AviscFlux) !Shock-capturing artificial viscous flux
+            !$acc enter data copyin(self % faces(iFace) % storage(2) % AviscFlux) !Shock-capturing artificial viscous flux
+         end if
+#endif
          !$acc enter data copyin(self % faces(iFace) % geom)
          !$acc enter data copyin(self % faces(iFace) % geom % x)
          !$acc enter data copyin(self % faces(iFace) % geom % h)
@@ -4634,9 +4683,18 @@ slavecoord:             DO l = 1, 4
       !-----------------------------------------------------------
       integer :: eID
       integer     :: i, j, k, iFace, fID, zoneID, nZones
+#ifdef NAVIERSTOKES
+      logical     :: scOnDevice
+#endif
       !-----------------------------------------------------------
 
       print*, "I de-allocate the device data"
+
+#ifdef NAVIERSTOKES
+!     The shock-capturing fluxes are on the device only in shock-capturing runs
+      scOnDevice = .false.
+      if (size(self % elements) > 0) scOnDevice = allocated(self % elements(1) % storage % AviscContravariantFlux)
+#endif
 
       DO eID = 1, SIZE(self % elements)
          !$acc exit data delete(self % elements(eID) % Nxyz)
@@ -4676,6 +4734,11 @@ slavecoord:             DO l = 1, 4
 #ifdef FLOW
          if (allocated(self % elements(eID) % storage % Q_grad)) then
             !$acc exit data delete(self % elements(eID) % storage % Q_grad) ! Gradient variables to calculate the gradient
+         end if
+#endif
+#ifdef NAVIERSTOKES
+         if (allocated(self % elements(eID) % storage % AviscContravariantFlux)) then
+            !$acc exit data delete(self % elements(eID) % storage % AviscContravariantFlux) !Shock-capturing artificial viscous flux
          end if
 #endif
 #ifdef CAHNHILLIARD
@@ -4725,6 +4788,12 @@ slavecoord:             DO l = 1, 4
          !$acc exit data delete(self % faces(iFace) % storage(2) % unStar)
          !$acc exit data delete(self % faces(iFace) % storage(1) % rho)
          !$acc exit data delete(self % faces(iFace) % storage(2) % rho)
+#ifdef NAVIERSTOKES
+         if (scOnDevice) then
+            !$acc exit data delete(self % faces(iFace) % storage(1) % AviscFlux) !Shock-capturing artificial viscous flux
+            !$acc exit data delete(self % faces(iFace) % storage(2) % AviscFlux) !Shock-capturing artificial viscous flux
+         end if
+#endif
          !$acc exit data delete(self % faces(iFace) % storage)
          !$acc exit data delete(self % faces(iFace) % geom % x)
          !$acc exit data delete(self % faces(iFace) % geom % h)

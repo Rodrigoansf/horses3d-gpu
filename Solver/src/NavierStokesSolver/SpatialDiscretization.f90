@@ -446,6 +446,14 @@ module SpatialDiscretization
          call compute_viscosity_at_faces(size(mesh % faces_interior), 2, mesh % faces_interior, mesh)
          call compute_viscosity_at_faces(size(mesh % faces_boundary), 1, mesh % faces_boundary, mesh)
 !
+!        *******************************
+!        Shock-capturing (artificial viscosity)
+!        *******************************
+!
+         if (ShockCapturingDriver % isActive) then
+            call TimeDerivative_ComputeArtificialViscosity(mesh)
+         end if
+!
 !        ****************
 !        Volume integrals
 !        ****************
@@ -1283,6 +1291,28 @@ module SpatialDiscretization
 !
 !///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 !
+      subroutine TimeDerivative_ComputeArtificialViscosity(mesh)
+!
+!        Artificial viscous flux of every element, prolonged to the faces
+!
+         use HexMeshClass
+         implicit none
+         type(HexMesh), intent(inout) :: mesh
+         integer :: eID
+
+         !$acc parallel loop gang present(mesh) async(1)
+         do eID = 1, size(mesh % elements)
+            call SC_ComputeElementAviscFlux(mesh % elements(eID), eID)
+         end do
+         !$acc end parallel loop
+
+         call SC_UpdateHostArtificialDiss(mesh)
+         call SC_ProlongAviscFluxToFaces(mesh)
+
+      end subroutine TimeDerivative_ComputeArtificialViscosity
+!
+!///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+!
       subroutine TimeDerivative_VolumetricContribution(mesh)
          use HexMeshClass
          use ElementClass
@@ -1346,6 +1376,24 @@ module SpatialDiscretization
                end do
             end do               ; end do                ; end do
 
+!
+!           Artificial viscosity, with the sign of the viscous flux
+!           -------------------------------------------------------
+            if (SCdev_isActive) then
+               !$acc loop vector collapse(3)
+               do k = 0, mesh % elements(eID) % Nxyz(3) ; do j = 0, mesh % elements(eID) % Nxyz(2) ; do i = 0, mesh % elements(eID) % Nxyz(1)
+                  !$acc loop seq
+                  do eq = 1, NCONS
+                     mesh % elements(eID) % storage % contravariantFlux(eq,i,j,k,IX) = mesh % elements(eID) % storage % contravariantFlux(eq,i,j,k,IX) &
+                                                                                     - mesh % elements(eID) % storage % AviscContravariantFlux(eq,i,j,k,IX)
+                     mesh % elements(eID) % storage % contravariantFlux(eq,i,j,k,IY) = mesh % elements(eID) % storage % contravariantFlux(eq,i,j,k,IY) &
+                                                                                     - mesh % elements(eID) % storage % AviscContravariantFlux(eq,i,j,k,IY)
+                     mesh % elements(eID) % storage % contravariantFlux(eq,i,j,k,IZ) = mesh % elements(eID) % storage % contravariantFlux(eq,i,j,k,IZ) &
+                                                                                     - mesh % elements(eID) % storage % AviscContravariantFlux(eq,i,j,k,IZ)
+                  end do
+               end do               ; end do                ; end do
+            end if
+
             call ScalarWeakIntegrals_StdVolumeGreen( mesh % elements(eID) % Nxyz, NCONS, mesh % elements(eID) % storage % contravariantFlux, &
                                                      mesh % elements(eID) % storage % QDot)
       
@@ -1408,6 +1456,24 @@ module SpatialDiscretization
                      mesh % elements(eID) % storage % Qdot(eq,i,j,k)  = 0.0_RP
                   end do
             end do               ; end do                ; end do
+
+!
+!        Artificial viscosity, with the sign of the viscous flux
+!        -------------------------------------------------------
+         if (SCdev_isActive) then
+            !$acc loop vector collapse(3)
+            do k = 0, mesh % elements(eID) % Nxyz(3) ; do j = 0, mesh % elements(eID) % Nxyz(2) ; do i = 0, mesh % elements(eID) % Nxyz(1)
+               !$acc loop seq
+               do eq = 1, NCONS
+                  mesh % elements(eID) % storage % contravariantFlux(eq,i,j,k,IX) = mesh % elements(eID) % storage % contravariantFlux(eq,i,j,k,IX) &
+                                                                                  - mesh % elements(eID) % storage % AviscContravariantFlux(eq,i,j,k,IX)
+                  mesh % elements(eID) % storage % contravariantFlux(eq,i,j,k,IY) = mesh % elements(eID) % storage % contravariantFlux(eq,i,j,k,IY) &
+                                                                                  - mesh % elements(eID) % storage % AviscContravariantFlux(eq,i,j,k,IY)
+                  mesh % elements(eID) % storage % contravariantFlux(eq,i,j,k,IZ) = mesh % elements(eID) % storage % contravariantFlux(eq,i,j,k,IZ) &
+                                                                                  - mesh % elements(eID) % storage % AviscContravariantFlux(eq,i,j,k,IZ)
+               end do
+            end do               ; end do                ; end do
+         end if
 !
 !           ***************************************************************************
 !           Compute split volume integral with viscous and two-point flux contributions
@@ -1505,15 +1571,26 @@ module SpatialDiscretization
 !        ------------------------
 !        Multiply by the Jacobian
 !        ------------------------
-         !$acc loop vector collapse(3)
-         do j = 0, fc % Nf(2) ; do i = 0, fc % Nf(1) ; do eq = 1, NCONS
-               fc % storage(1) % FStar(eq,i,j) = (fc % storage(1) % FStar(eq,i,j) - fc % storage(2) % FStar(eq,i,j)) * fc % geom % jacobian(i,j)
-         end do ; end do ;  end do
+         if (SCdev_isActive) then
+!
+!           Artificial viscosity: average of both sides
+!           -------------------------------------------
+            !$acc loop vector collapse(3)
+            do j = 0, fc % Nf(2) ; do i = 0, fc % Nf(1) ; do eq = 1, NCONS
+                  fc % storage(1) % FStar(eq,i,j) = (fc % storage(1) % FStar(eq,i,j) - fc % storage(2) % FStar(eq,i,j)) * fc % geom % jacobian(i,j) &
+                                                  - 0.5_RP * (fc % storage(1) % AviscFlux(eq,i,j) + fc % storage(2) % AviscFlux(eq,i,j))
+            end do ; end do ;  end do
+         else
+            !$acc loop vector collapse(3)
+            do j = 0, fc % Nf(2) ; do i = 0, fc % Nf(1) ; do eq = 1, NCONS
+                  fc % storage(1) % FStar(eq,i,j) = (fc % storage(1) % FStar(eq,i,j) - fc % storage(2) % FStar(eq,i,j)) * fc % geom % jacobian(i,j)
+            end do ; end do ;  end do
+         end if
 !
 !        ---------------------------
 !        Return the flux to elements
 !        ---------------------------
-!         
+!
         call Face_ProjectFluxToElements(fc, NCONS, fc % storage(1) % FStar, 1)
         call Face_ProjectFluxToElements(fc, NCONS, fc % storage(1) % FStar, 2)
 
@@ -1528,16 +1605,6 @@ module SpatialDiscretization
          type(Face)   , intent(inout) :: fc
          integer       :: i, j, eq, maxId
          integer       :: Sidearray
-!
-!        ---------------------------
-!        Artificial viscosity fluxes
-!        ---------------------------
-!
-         !if ( ShockCapturingDriver % isActive ) then
-         !   Avisc_flux = 0.5_RP * (f % storage(1) % AviscFlux + f % storage(2) % AviscFlux)
-         !else
-         !   Avisc_flux = 0.0_RP
-         !end if
 !
 !        --------------
 !        Viscous fluxes
@@ -1581,6 +1648,16 @@ module SpatialDiscretization
             do eq = 1, NCONS
                fc % storage(1) % FStar(eq,i,j) = (fc % storage(1) % FStar(eq,i,j) - fc % storage(2) % FStar(eq,i,j)) * fc % geom % jacobian(i,j)
             enddo
+!
+!           Artificial viscosity (see computeElementInterfaceFlux)
+!           ------------------------------------------------------
+            if (SCdev_isActive) then
+               !$acc loop seq
+               do eq = 1, NCONS
+                  fc % storage(1) % FStar(eq,i,j) = fc % storage(1) % FStar(eq,i,j) &
+                                                  - 0.5_RP * (fc % storage(1) % AviscFlux(eq,i,j) + fc % storage(2) % AviscFlux(eq,i,j))
+               enddo
+            end if
          end do ;  end do
 !
 !        ---------------------------
@@ -1694,6 +1771,18 @@ module SpatialDiscretization
                                                                     + mesh % faces(fID) % storage(1) % unStar(eq,IY,i,j)* mesh % faces(fID) % geom % normal(IY,i,j) &
                                                                     + mesh % faces(fID) % storage(1) % unStar(eq,IZ,i,j)* mesh % faces(fID) % geom % normal(IZ,i,j)
                   end do
+!
+!                 Artificial viscosity, before FlowNeumann so that the wall
+!                 conditions act on it too (the Jacobian is applied below)
+!                 ---------------------------------------------------------
+                  if (SCdev_isActive) then
+                     !$acc loop seq
+                     do eq = 1, NCONS
+                        mesh % faces(fID) % storage(2) % FStar(eq,i,j) = mesh % faces(fID) % storage(2) % FStar(eq,i,j) &
+                                                                       + mesh % faces(fID) % storage(1) % AviscFlux(eq,i,j) &
+                                                                       / mesh % faces(fID) % geom % jacobian(i,j)
+                     end do
+                  end if
                end do ; end do
             end do
             !$acc end parallel loop 

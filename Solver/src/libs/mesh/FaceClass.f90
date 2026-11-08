@@ -23,6 +23,7 @@
 
       private
       public   Face, Face_ProjectFluxToElements, Face_AdaptSolToFace, Face_AdaptGradientsToFace, Face_ProjectGradientFluxToElements
+      public   Face_AdaptAviscToFace
 !
 !     ************************************************************************************
 !
@@ -361,14 +362,18 @@
 !     ---------------
 !
       integer       :: i, j, k, l, m, ii, jj, eq
-
+!
+!     Meshes made 2D for MPI keep order 1 on the faces where the elements have order 0
+!     (CorrectOrderFor2DMesh runs after the faces are linked, as in legacy): there the
+!     element value is repeated across the face, which is what legacy's projection gives.
+!
       select case (side)
       case(1)
             !$acc loop vector collapse(2)
             do j = 0, self % NfLeft(2)   ; do i = 0, self % NfLeft(1)
                !$acc loop seq
                do eq = 1, nEqn
-                  self % storage(1) % Q(eq,i,j) = Qe(eq,i,j)
+                  self % storage(1) % Q(eq,i,j) = Qe(eq,min(i,Nelx),min(j,Nely))
                enddo
             enddo ; enddo
       case(2)
@@ -377,7 +382,7 @@
             call leftIndexes2Right(i,j,self % NfRight(1), self % NfRight(2), self % rotation, ii, jj)
             !$acc loop seq
             do eq = 1, nEqn
-               self % storage(2) % Q(eq,i,j) = Qe(eq,ii,jj)
+               self % storage(2) % Q(eq,i,j) = Qe(eq,min(ii,Nelx),min(jj,Nely))
             enddo 
          enddo ; enddo 
 
@@ -424,11 +429,11 @@
             call leftIndexes2Right(i,j,self % NfRight(1), self % NfRight(2), self % rotation, ii, jj)
             select case (dir)
             case (1)
-                  self % storage(2) % U_x(eq,i,j) = Uxe(eq,ii,jj)
+                  self % storage(2) % U_x(eq,i,j) = Uxe(eq,min(ii,Nelx),min(jj,Nely))
             case (2)
-                  self % storage(2) % U_y(eq,i,j) = Uxe(eq,ii,jj)
+                  self % storage(2) % U_y(eq,i,j) = Uxe(eq,min(ii,Nelx),min(jj,Nely))
             case (3)
-                  self % storage(2) % U_z(eq,i,j) = Uxe(eq,ii,jj)
+                  self % storage(2) % U_z(eq,i,j) = Uxe(eq,min(ii,Nelx),min(jj,Nely))
             end select
          end do ; end do ; end do
       end select
@@ -518,6 +523,48 @@
       end select
 
    end subroutine Face_AdaptAviscFluxToFace
+
+   ! Device version of Face_AdaptAviscFluxToFace, simplified as Face_AdaptSolToFace is:
+   ! it takes into account rotation (and the sign change of the right side) but not
+   ! projections. I.e., non-conforming (mortar) faces are not supported
+   subroutine Face_AdaptAviscToFace(self, nEqn, Nelx, Nely, AVn_e, side)
+      !$acc routine vector
+      use MappedGeometryClass
+      implicit none
+      type(Face),    intent(inout)  :: self
+      integer,       intent(in)     :: nEqn
+      integer,       intent(in)     :: Nelx, Nely
+      real(kind=RP), intent(in)     :: AVn_e(1:NCONS, 0:Nelx, 0:Nely)
+      integer,       intent(in)     :: side
+!
+!     ---------------
+!     Local variables
+!     ---------------
+!
+      integer       :: i, j, ii, jj, eq
+
+      select case (side)
+      case(1)
+            !$acc loop vector collapse(2)
+            do j = 0, self % NfLeft(2)   ; do i = 0, self % NfLeft(1)
+               !$acc loop seq
+               do eq = 1, nEqn
+                  self % storage(1) % AviscFlux(eq,i,j) = AVn_e(eq,min(i,Nelx),min(j,Nely))
+               enddo
+            enddo ; enddo
+      case(2)
+         !$acc loop vector collapse(2)
+         do j = 0, self % NfRight(2)   ; do i = 0, self % NfRight(1)
+            call leftIndexes2Right(i,j,self % NfRight(1), self % NfRight(2), self % rotation, ii, jj)
+            !$acc loop seq
+            do eq = 1, nEqn
+               self % storage(2) % AviscFlux(eq,i,j) = -AVn_e(eq,min(ii,Nelx),min(jj,Nely))
+            enddo
+         enddo ; enddo
+
+      end select
+
+   end subroutine Face_AdaptAviscToFace
 
    subroutine Face_ProjectFluxToElements(self, nEqn, flux, side)
       !$acc routine vector
