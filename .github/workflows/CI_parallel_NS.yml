@@ -61,7 +61,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y openmpi-bin libopenmpi-dev
-          export OMPI_FCFLAGS="-DOMPI_SKIP_MPIF08" # deactivate mpi_f08 interface to avoid compilation problems
+          export OMPI_FCFLAGS="$(mpif90 --showme:compile) -DOMPI_SKIP_MPIF08" # deactivate mpi_f08 interface to avoid compilation problems; the wrapper's own flags first (OpenMPI 5 keeps its include paths there)
           mpif90 --version
           mpif90 --showme
           mpicc --version
@@ -93,7 +93,7 @@ jobs:
       - name: Install HDF5 (gnu)
         if: (matrix.compiler == 'gfortran') 
         run: |
-          export OMPI_FCFLAGS="-DOMPI_SKIP_MPIF08" # deactivate mpi_f08 interface to avoid compilation problems
+          export OMPI_FCFLAGS="$(mpif90 --showme:compile) -DOMPI_SKIP_MPIF08" # deactivate mpi_f08 interface to avoid compilation problems; the wrapper's own flags first (OpenMPI 5 keeps its include paths there)
           wget "https://support.hdfgroup.org/ftp/HDF5/releases/hdf5-1.12/hdf5-1.12.0/src/hdf5-1.12.0.tar.gz"
           tar -xvf hdf5-1.12.0.tar.gz
           cd hdf5-1.12.0
@@ -119,9 +119,8 @@ jobs:
       # # UNCOMMENT TO USE CACHED IFORT 
       # #  if: (steps.cache-intel-compilers.outputs.cache-hit != 'true')
       #   run: |
-      #     wget https://apt.repos.intel.com/intel-gpg-keys/GPG-PUB-KEY-INTEL-SW-PRODUCTS.PUB
-      #     sudo apt-key add GPG-PUB-KEY-INTEL-SW-PRODUCTS.PUB
-      #     sudo add-apt-repository "deb https://apt.repos.intel.com/oneapi all main"
+      #     wget -qO- https://apt.repos.intel.com/intel-gpg-keys/GPG-PUB-KEY-INTEL-SW-PRODUCTS.PUB | gpg --dearmor | sudo tee /usr/share/keyrings/oneapi-archive-keyring.gpg > /dev/null
+      #     echo "deb [signed-by=/usr/share/keyrings/oneapi-archive-keyring.gpg] https://apt.repos.intel.com/oneapi all main" | sudo tee /etc/apt/sources.list.d/oneAPI.list
       #     sudo apt-get update
 
       # - name: Install Intel oneAPI
@@ -145,6 +144,7 @@ jobs:
           wget "https://src.fedoraproject.org/lookaside/pkgs/metis/metis-5.1.0.tar.gz/5465e67079419a69e0116de24fce58fe/metis-5.1.0.tar.gz" 
           tar -xvf metis-5.1.0.tar.gz
           cd metis-5.1.0
+          export CMAKE_POLICY_VERSION_MINIMUM=3.5  # METIS 5.1.0 asks for CMake 2.8, which CMake 4 no longer accepts by default
           make config cc=icx
           make
           mv /home/runner/work/horses3d-gpu/horses3d-gpu/metis-5.1.0/build/Linux-x86_64/libmetis /home/runner/work/horses3d-gpu/horses3d-gpu/metis-5.1.0/build/Linux-x86_64/lib
@@ -157,10 +157,11 @@ jobs:
       # wget "http://glaros.dtc.umn.edu/gkhome/fetch/sw/metis/metis-5.1.0.tar.gz" (OLD LINK TO METIS)
         if: (matrix.compiler == 'gfortran') 
         run: |
-          export OMPI_FCFLAGS="-DOMPI_SKIP_MPIF08" # deactivate mpi_f08 interface to avoid compilation problems
+          export OMPI_FCFLAGS="$(mpif90 --showme:compile) -DOMPI_SKIP_MPIF08" # deactivate mpi_f08 interface to avoid compilation problems; the wrapper's own flags first (OpenMPI 5 keeps its include paths there)
           wget "https://src.fedoraproject.org/lookaside/pkgs/metis/metis-5.1.0.tar.gz/5465e67079419a69e0116de24fce58fe/metis-5.1.0.tar.gz" 
           tar -xvf metis-5.1.0.tar.gz
           cd metis-5.1.0
+          export CMAKE_POLICY_VERSION_MINIMUM=3.5  # METIS 5.1.0 asks for CMake 2.8, which CMake 4 no longer accepts by default
           make config cc=gcc
           make
           mv /home/runner/work/horses3d-gpu/horses3d-gpu/metis-5.1.0/build/Linux-x86_64/libmetis /home/runner/work/horses3d-gpu/horses3d-gpu/metis-5.1.0/build/Linux-x86_64/lib
@@ -190,7 +191,7 @@ jobs:
       - name: Compile horses3d
         working-directory: ./Solver
         run: |
-         export OMPI_FCFLAGS="-DOMPI_SKIP_MPIF08" # deactivate mpi_f08 interface to avoid compilation problems
+         export OMPI_FCFLAGS="$(mpif90 --showme:compile) -DOMPI_SKIP_MPIF08" # deactivate mpi_f08 interface to avoid compilation problems; the wrapper's own flags first (OpenMPI 5 keeps its include paths there)
           
          # Compile the code
          make allclean MODE=${{matrix.mode}} COMPILER=${{matrix.compiler}} COMM=${{matrix.comm}} ENABLE_THREADS=${{matrix.enable_threads}} WITH_METIS=YES WITH_MKL=${{matrix.mkl}} WITH_HDF5=${{matrix.hdf5}} EXTRA_FFLAGS="${{ env.EXTRA_COV }}" EXTRA_LDFLAGS="$EXTRA_LINK_FLAGS"
@@ -207,14 +208,14 @@ jobs:
       - name: Build unit test WallShearStress
         working-directory: ./Solver/test/Components/WallShearStress
         run: |
-         export OMPI_FCFLAGS="-DOMPI_SKIP_MPIF08" # deactivate mpi_f08 interface to avoid compilation problems
+         export OMPI_FCFLAGS="$(mpif90 --showme:compile) -DOMPI_SKIP_MPIF08" # deactivate mpi_f08 interface to avoid compilation problems; the wrapper's own flags first (OpenMPI 5 keeps its include paths there)
          make unittest MODE=${{matrix.mode}} COMPILER=${{matrix.compiler}} COMM=${{matrix.comm}} ENABLE_THREADS=${{matrix.enable_threads}} WITH_METIS=YES WITH_MKL=${{matrix.mkl}} WITH_HDF5=${{matrix.hdf5}} EXTRA_FFLAGS="${{ env.EXTRA_COV }}"
         if: '!cancelled()'
 
       - name: Run unit test WallShearStress
         working-directory: ./Solver/test/Components/WallShearStress
         run: |
-         export OMPI_FCFLAGS="-DOMPI_SKIP_MPIF08" # deactivate mpi_f08 interface to avoid compilation problems
+         export OMPI_FCFLAGS="$(mpif90 --showme:compile) -DOMPI_SKIP_MPIF08" # deactivate mpi_f08 interface to avoid compilation problems; the wrapper's own flags first (OpenMPI 5 keeps its include paths there)
          make run-unittest MODE=${{matrix.mode}} COMPILER=${{matrix.compiler}} COMM=${{matrix.comm}} ENABLE_THREADS=${{matrix.enable_threads}} WITH_METIS=YES WITH_MKL=${{matrix.mkl}} WITH_HDF5=${{matrix.hdf5}} EXTRA_FFLAGS="${{ env.EXTRA_COV }}"
         if: '!cancelled()'
 
