@@ -12,9 +12,12 @@ in horses3d, where the other equation sets have cases too.
 
 Actions > MMS convergence > Run workflow. Choose the case (or all), the polynomial
 orders, the meshes and, optionally, changes to the control file such as
-`Reynolds number = 100; Riemann solver = Roe`. Each case builds its solver, writes the
-table of errors and orders to the job summary, and uploads `errors.csv`,
-`convergence.png` and the control files and logs of the runs.
+`Reynolds number = 100; Riemann solver = Roe`. Each case and order runs in its own job,
+so that the default sweep fits in the 6-hour limit of a job; mesh 32 at high P does not.
+A final job per case merges them, writes the table of errors and orders to the job
+summary and uploads `errors.csv`, `convergence.png` and the control files and logs of the
+runs. The default sweep of both cases, P = 3 to 6 on meshes 4, 8 and 16, takes about
+three and a quarter hours, set by NS at P = 6 on one thread.
 
 GitHub shows the Run workflow button only for workflows on the default branch. On
 another branch, once the workflow has run in the repository, use the GitHub CLI:
@@ -29,10 +32,10 @@ Build the solver (`./configure && make ns COMPILER=gfortran ENABLE_THREADS=NO` i
 
 ```
 pip install sympy gmsh matplotlib
-python3 run.py NS                                   # P = 2 3 on meshes 4 8
-python3 run.py NS --P 2 3 4 5 --meshes 4 8 16       # full study
+python3 run.py NS                                   # P = 3 4 5 6 on meshes 4 8 16
+python3 run.py NS --P 3 4 --meshes 4 8              # quick run
 python3 run.py NS --set "Reynolds number = 100"     # change the control file
-python3 run.py MU --check                           # compare with MU/reference.csv
+python3 run.py MU --P 3 4 --meshes 4 8 --check      # compare with MU/reference.csv
 python3 plot.py NS                                  # NS/convergence.png
 ```
 
@@ -60,8 +63,9 @@ are kept in this repository.
   source term and writes `mms_l2_error.dat` with the total and per-variable L2 errors,
   normalised by the mesh volume (integral of 1).
 * `<case>/control_template.control`: control file of each case.
-* `<case>/reference.csv`: errors of the committed case, the same as in horses3d (gfortran,
-  RELEASE). After changing a case on purpose, copy its `errors.csv` here.
+* `<case>/reference.csv`: errors of the default sweep of the committed case, the same as
+  in horses3d (gfortran, RELEASE). After changing a case on purpose, copy its `errors.csv`
+  here.
 
 ## Results
 
@@ -69,16 +73,16 @@ Orders of the total error between meshes 8 and 16 (theory P+1), gfortran:
 
 | P | NS | MU |
 |---|---|---|
-| 2 | 2.65 | 2.00 |
 | 3 | 3.90 | 3.04 |
 | 4 | 4.87 | 4.06 |
-| 5 | 5.69 | |
+| 5 | 5.69 | 5.06 |
+| 6 | 6.53 | 5.99 |
 
-* The meshes up to 16 are not fully in the asymptotic range: between 16 and 32 elements
-  per side NS gives 2.95, 3.89, 4.72 and 5.54.
+* NS converges at about P+1. Refining it to 32 elements per side gives about the same
+  orders (3.89, 4.72 and 5.54 at P = 3, 4 and 5), so meshes 8 and 16 are in the
+  asymptotic range.
 * MU converges closer to P because the artificial compressibility multiplies the
-  divergence error by c0^2. At P = 2 the momentum and the concentration converge more
-  slowly than the pressure, which dominates the total.
+  divergence error by c0^2.
 * NS runs at Re = 1e5, where the viscous terms are a small part of the source term.
 
 ## Assumptions
@@ -88,4 +92,8 @@ Orders of the total error between meshes 8 and 16 (theory P+1), gfortran:
   `artificial sound speed square`. Gravity is not included.
 * Keep the final time: with u ~ sin(t), as in NS, a short run leaves the flow nearly at
   rest, the source is dominated by du/dt and the measured order drops.
+* The time steps of the control files are stable up to P = 6 on mesh 16; higher orders or
+  finer meshes may need a smaller `dt`, with more steps to keep the final time. In MU the
+  explicit step is limited by Cahn-Hilliard, which scales like h^4/P^8; the chemical
+  characteristic time of 2000 s (a small mobility) keeps dt = 1e-7 stable.
 * The error sums are rank-local, so run without MPI.
