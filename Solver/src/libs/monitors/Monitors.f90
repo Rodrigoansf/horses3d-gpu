@@ -634,6 +634,8 @@ module MonitorsClass
          
          to % dt_restriction        = from % dt_restriction
          to % write_dt_restriction  = from % write_dt_restriction
+         to % volumeOnHost          = from % volumeOnHost
+         to % volumeQDot            = from % volumeQDot
          
          safedeallocate (to % t)
          allocate (to % t (size (from % t) ) ) 
