@@ -647,6 +647,7 @@ module VolumeIntegrals
          end do
 !$omp end parallel do
 !$acc end parallel loop
+!$acc wait
 
 
             case ( MOMENTUM )
