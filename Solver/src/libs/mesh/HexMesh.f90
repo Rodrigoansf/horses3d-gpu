@@ -4815,14 +4815,22 @@ slavecoord:             DO l = 1, 4
  
    end subroutine HexMesh_ExitDeviceData
 
-   subroutine HexMesh_UpdateHostData(self)
+   subroutine HexMesh_UpdateHostData(self, withQDot)
+!
+!     Copy the solution, its gradients and the viscosities to the host, and QDot with withQDot
+!
       use Physics
       implicit none
       !-----------------------------------------------------------
       class(HexMesh)                  :: self
+      logical, optional, intent(in)   :: withQDot
       !-----------------------------------------------------------
       integer :: eID
+      logical :: qdot
       !-----------------------------------------------------------
+
+      qdot = .false.
+      if (present(withQDot)) qdot = withQDot
 
       !$acc wait
 
@@ -4836,6 +4844,9 @@ slavecoord:             DO l = 1, 4
 #ifdef CAHNHILLIARD
          !$acc update self(self % elements(eID) % storage % mu)
 #endif
+         if (qdot) then
+            !$acc update self(self % elements(eID) % storage % QDot)
+         end if
       enddo
       
       !$acc wait
