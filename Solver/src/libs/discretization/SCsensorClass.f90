@@ -3,7 +3,10 @@ module SCsensorClass
 
    use SMConstants,       only: RP, PI, STD_OUT, NDIM, IX, IY, IZ, LINE_LENGTH
    use DGSEMClass,        only: ComputeTimeDerivative_f, DGSem
-   use PhysicsStorage,    only: grad_vars, GRADVARS_STATE, GRADVARS_ENERGY, GRADVARS_ENTROPY, NCONS
+   use PhysicsStorage,    only: grad_vars, GRADVARS_STATE, GRADVARS_ENERGY, GRADVARS_ENTROPY, NCONS, NGRAD, &
+                                IRHO, IRHOU, IRHOV, IRHOW, IRHOE
+   use VariableConversion, only: Pressure, getVelocityGradients_selector
+   use FluidData,          only: thermodynamics, dimensionless
    use NodalStorageClass, only: NodalStorage, NodalStorage_t
    use ElementClass,      only: Element
    use Utilities,         only: toLower
@@ -23,6 +26,7 @@ module SCsensorClass
    public :: SCsensor_t
    public :: Set_SCsensor
    public :: Destruct_SCsensor
+   public :: GetSensedVariable_0D, GMMFeatures_0D
 
    type :: TruncationError_t
       integer                  :: Nmin       !< Min order N
@@ -55,6 +59,9 @@ module SCsensorClass
 
          procedure :: Describe => Describe_SCsensor
          procedure :: Compute  => Compute_SCsensor
+         procedure :: ApplyInertia => SensorInertia
+         procedure :: SensorFromFeatures => GMM_SensorFromFeatures
+         procedure :: SensorFromFeaturesOnDevice => GMM_SensorFromFeatures_acc
          final     :: Destruct_SCsensor
 
    end type SCsensor_t
@@ -457,9 +464,6 @@ module SCsensorClass
 !     Local variables
 !     ---------------
 !
-      type(Element), pointer :: e
-      integer                :: eID
-      real(RP)               :: s
 
 !
 !     Compute the sensor
@@ -468,6 +472,23 @@ module SCsensorClass
 !
 !     Add 'inertia' to the scaled value
 !     ---------------------------------
+      call SensorInertia(sensor, sem)
+
+   end subroutine Compute_SCsensor
+!
+!///////////////////////////////////////////////////////////////////////////////
+!
+   subroutine SensorInertia(sensor, sem)
+!
+!     Keep the sensor on for at least min_steps steps once it has fired
+!
+      implicit none
+      class(SCsensor_t),         intent(in)    :: sensor
+      type(DGsem),       target, intent(inout) :: sem
+      type(Element), pointer :: e
+      integer                :: eID
+      real(RP)               :: s
+
       if (sensor % min_steps > 1) then   ! Enter the loop only if necessary
 !$omp parallel do default(private) shared(sem)
          do eID = 1, sem % mesh % no_of_elements
@@ -491,7 +512,7 @@ module SCsensorClass
 
       nullify(e)
 
-   end subroutine Compute_SCsensor
+   end subroutine SensorInertia
 !
 !///////////////////////////////////////////////////////////////////////////////
 !
@@ -993,13 +1014,6 @@ module SCsensorClass
 !
    subroutine Sensor_GMM(sensor, sem, t)
 !
-!     -------
-!     Modules
-!     -------
-      use PhysicsStorage,     only: IRHO, IRHOU, IRHOV, IRHOW, IRHOE
-      use FluidData,          only: thermodynamics, dimensionless
-      use VariableConversion, only: Pressure, getVelocityGradients
-!
 !     ---------
 !     Interface
 !     ---------
@@ -1015,14 +1029,6 @@ module SCsensorClass
       integer                :: eID
       integer                :: i, j, k
       integer                :: cnt
-      integer                :: n
-      integer                :: cluster
-      integer                :: nclusters
-      integer                :: ip, jc, jmax
-      logical                :: with_kmeans
-      real(RP)               :: u2, p
-      real(RP)               :: ux(3), uy(3), uz(3)
-      real(RP)               :: dp(3)
 
 !
 !     Compute the clustering variables and store them in a global array
@@ -1036,96 +1042,45 @@ module SCsensorClass
 
             cnt = cnt + 1
 
-            ! Divergence of V
-            call getVelocityGradients(     &
-               e % storage % Q(:,i,j,k),   &
-               e % storage % U_x(:,i,j,k), &
-               e % storage % U_y(:,i,j,k), &
-               e % storage % U_z(:,i,j,k), &
-               ux, uy, uz                  &
-            )
-
-            sensor % x(1,cnt) = (ux(1) + uy(2) + uz(3))**2
-
-            ! Derivative of density
-            ! if (grad_vars == GRADVARS_ENTROPY) then
-            !     sensor % x(1,cnt) = dot_product(e % storage % Q(:,i,j,k), e % storage % U_x(:,i,j,k))**2 + &
-            !                         dot_product(e % storage % Q(:,i,j,k), e % storage % U_y(:,i,j,k))**2 + &
-            !                         dot_product(e % storage % Q(:,i,j,k), e % storage % U_z(:,i,j,k))**2
-            ! else
-            !     sensor % x(1,cnt) = e % storage % U_x(IRHO,i,j,k)**2 + &
-            !                         e % storage % U_y(IRHO,i,j,k)**2 + &
-            !                         e % storage % U_z(IRHO,i,j,k)**2
-            ! end if
-
-            ! Derivative of pressure
-            if (grad_vars == GRADVARS_STATE) then
-               u2 = (                               &
-                  e % storage % Q(IRHOU,i,j,k)**2 + &
-                  e % storage % Q(IRHOV,i,j,k)**2 + &
-                  e % storage % Q(IRHOW,i,j,k)**2   &
-               ) / e % storage % Q(IRHO,i,j,k)**2
-
-               dp(1) = thermodynamics % gammaMinus1 * (         &
-                  e % storage % U_x(IRHOE,i,j,k) -              &
-                  0.5_RP * e % storage % U_x(IRHO,i,j,k) * u2 - &
-                  e % storage % Q(IRHOU,i,j,k) * ux(1) -        &
-                  e % storage % Q(IRHOV,i,j,k) * ux(2) -        &
-                  e % storage % Q(IRHOW,i,j,k) * ux(3)          &
-               )
-               dp(2) = thermodynamics % gammaMinus1 * (         &
-                  e % storage % U_y(IRHOE,i,j,k) -              &
-                  0.5_RP * e % storage % U_y(IRHO,i,j,k) * u2 - &
-                  e % storage % Q(IRHOU,i,j,k) * uy(1) -        &
-                  e % storage % Q(IRHOV,i,j,k) * uy(2) -        &
-                  e % storage % Q(IRHOW,i,j,k) * uy(3)          &
-               )
-               dp(3) = thermodynamics % gammaMinus1 * (         &
-                  e % storage % U_z(IRHOE,i,j,k) -              &
-                  0.5_RP * e % storage % U_z(IRHO,i,j,k) * u2 - &
-                  e % storage % Q(IRHOU,i,j,k) * uz(1) -        &
-                  e % storage % Q(IRHOV,i,j,k) * uz(2) -        &
-                  e % storage % Q(IRHOW,i,j,k) * uz(3)          &
-               )
-
-            elseif (grad_vars == GRADVARS_ENERGY) then
-               p = Pressure(e % storage % Q(:,i,j,k))
-               dp(1) = p / e % storage % Q(IRHO,i,j,k) * e % storage % U_x(IRHO,i,j,k) + &
-                       e % storage % Q(IRHO,i,j,k) / dimensionless % gammaM2 * e % storage % U_x(IRHOE,i,j,k)
-               dp(2) = p / e % storage % Q(IRHO,i,j,k) * e % storage % U_y(IRHO,i,j,k) + &
-                       e % storage % Q(IRHO,i,j,k) / dimensionless % gammaM2 * e % storage % U_y(IRHOE,i,j,k)
-               dp(3) = p / e % storage % Q(IRHO,i,j,k) * e % storage % U_z(IRHO,i,j,k) + &
-                       e % storage % Q(IRHO,i,j,k) / dimensionless % gammaM2 * e % storage % U_z(IRHOE,i,j,k)
-
-            else ! grad_vars == GRADVARS_ENTROPY
-               p = Pressure(e % storage % Q(:,i,j,k))
-               dp(1) = p / e % storage % Q(IRHO,i,j,k) * &
-                      (dot_product(e % storage % Q(:,i,j,k), e % storage % U_x(:,i,j,k)) + &
-                      p * e % storage % U_x(IRHOE,i,j,k))
-               dp(2) = p / e % storage % Q(IRHO,i,j,k) * &
-                      (dot_product(e % storage % Q(:,i,j,k), e % storage % U_y(:,i,j,k)) + &
-                      p * e % storage % U_y(IRHOE,i,j,k))
-               dp(3) = p / e % storage % Q(IRHO,i,j,k) * &
-                      (dot_product(e % storage % Q(:,i,j,k), e % storage % U_z(:,i,j,k)) + &
-                      p * e % storage % U_z(IRHOE,i,j,k))
-
-            end if
-
-            sensor % x(2,cnt) = dp(1)**2 + dp(2)**2 + dp(3)**2
+            call GMMFeatures_0D(e % storage % Q(:,i,j,k), e % storage % U_x(:,i,j,k),  &
+                                e % storage % U_y(:,i,j,k), e % storage % U_z(:,i,j,k),  &
+                                sensor % x(1,cnt), sensor % x(2,cnt))
 
          end do ;                end do ;                end do
 
       end do
 !
+!     Clustering, and the sensor of each element
+!     ------------------------------------------
+      call GMM_SensorFromFeatures(sensor, sem, sensor % x)
+
+   end subroutine Sensor_GMM
+!
+!///////////////////////////////////////////////////////////////////////////////
+!
+   subroutine GMM_SensorFromFeatures(sensor, sem, x)
+!
+!     Clustering of the features x of every node (see Sensor_GMM), and the
+!     sensor of each element
+!
+      implicit none
+      class(SCsensor_t), target, intent(inout) :: sensor
+      type(DGSem),       target, intent(inout) :: sem
+      real(RP),                  intent(inout) :: x(:,:)
+      type(Element), pointer :: e
+      integer                :: eID, cnt, n, cluster, nclusters, ip, jc, jmax
+      logical                :: with_kmeans
+
+!
 !     Rescale the values
 !     ------------------
-      call rescale(sensor % x)
+      call rescale(x)
 !
 !     Compute the GMM clusters
 !     ------------------------
       with_kmeans = sensor % gmm % nclusters == 0
-      call sensor % gmm % fit(sensor % x, adapt=.true., from_kmeans=with_kmeans)
-      call sensor % gmm % predict(sensor % x)
+      call sensor % gmm % fit(x, adapt=.true., from_kmeans=with_kmeans)
+      call sensor % gmm % predict(x)
 !
 !     Compute the sensor values
 !     -------------------------
@@ -1157,7 +1112,118 @@ module SCsensorClass
 
       nullify(e)
 
-   end subroutine Sensor_GMM
+   end subroutine GMM_SensorFromFeatures
+!
+!///////////////////////////////////////////////////////////////////////////////
+!
+   subroutine GMM_SensorFromFeatures_acc(sensor, x, first, s)
+!
+!     GMM_SensorFromFeatures with the features x on the device (OpenACC): the clustering
+!     and the sensor s of each element run there, and s is returned on the host and the
+!     device. first(eID) is the index in x of the first node of element eID, and
+!     first(nelem+1) = NDOF + 1. The k-means steps of the clustering use the host copy of x.
+!
+      implicit none
+      class(SCsensor_t), intent(inout) :: sensor
+      real(RP),          intent(inout) :: x(:,:)
+      integer,           intent(in)    :: first(:)
+      real(RP),          intent(inout) :: s(:)
+      logical :: with_kmeans
+
+      call rescale(x, on_device=.true.)
+
+      with_kmeans = sensor % gmm % nclusters == 0
+      call sensor % gmm % fit(x, adapt=.true., from_kmeans=with_kmeans, on_device=.true.)
+      call sensor % gmm % predict(x, on_device=.true.)
+
+      call GMM_ElementSensor(size(s), size(x, dim=2), size(sensor % gmm % prob, dim=2),         &
+                             sensor % gmm % nclusters, first, sensor % gmm % prob, s,          &
+                             .not. sensor % gmm % with_kmeans)
+
+   end subroutine GMM_SensorFromFeatures_acc
+!
+!///////////////////////////////////////////////////////////////////////////////
+!
+   subroutine GMM_ElementSensor(nelem, npts, ncols, nclusters, first, prob, s, dev)
+!
+!     The sensor of each element from the probabilities of its nodes, as in
+!     GMM_SensorFromFeatures, on the device (dev) or on the host; s ends on both
+!
+      implicit none
+      integer,  intent(in)    :: nelem
+      integer,  intent(in)    :: npts
+      integer,  intent(in)    :: ncols
+      integer,  intent(in)    :: nclusters
+      integer,  intent(in)    :: first(nelem+1)
+      real(RP), intent(in)    :: prob(npts, ncols)
+      real(RP), intent(inout) :: s(nelem)
+      logical,  intent(in)    :: dev
+      integer :: eID, ip, jc, jmax, cluster
+
+      !$acc parallel loop gang present(first, prob, s) private(cluster) if(dev)
+      do eID = 1, nelem
+         if (nclusters <= 1) then
+            s(eID) = 0.0_RP
+         else
+            cluster = 1
+            !$acc loop vector reduction(max:cluster) private(jmax)
+            do ip = first(eID), first(eID+1) - 1
+               jmax = 1
+               !$acc loop seq
+               do jc = 2, nclusters
+                  if (prob(ip,jc) > prob(ip,jmax)) jmax = jc
+               end do
+               cluster = max(cluster, jmax)
+            end do
+            s(eID) = real(cluster - 1, RP) / (nclusters - 1)
+         end if
+      end do
+
+      if (dev) then
+         !$acc update self(s)
+      else
+         !$acc update device(s)
+      end if
+
+   end subroutine GMM_ElementSensor
+!
+!///////////////////////////////////////////////////////////////////////////////
+!
+   subroutine GMMFeatures_0D(Q, U_x, U_y, U_z, x1, x2)
+!
+!     Features of one node for the GMM sensor: (div V)^2 and |grad p|^2
+!
+      !$acc routine seq
+      implicit none
+      real(RP), intent(in)  :: Q(NCONS)
+      real(RP), intent(in)  :: U_x(NGRAD), U_y(NGRAD), U_z(NGRAD)
+      real(RP), intent(out) :: x1, x2
+      real(RP) :: u2, p
+      real(RP) :: ux(3), uy(3), uz(3)
+      real(RP) :: dp(3)
+
+      call getVelocityGradients_selector(Q, U_x, U_y, U_z, ux, uy, uz)
+      x1 = (ux(1) + uy(2) + uz(3))**2
+
+      if (grad_vars == GRADVARS_STATE) then
+         u2 = (Q(IRHOU)**2 + Q(IRHOV)**2 + Q(IRHOW)**2) / Q(IRHO)**2
+         dp(1) = thermodynamics % gammaMinus1 * (U_x(IRHOE) - 0.5_RP * U_x(IRHO) * u2 - Q(IRHOU) * ux(1) - Q(IRHOV) * ux(2) - Q(IRHOW) * ux(3))
+         dp(2) = thermodynamics % gammaMinus1 * (U_y(IRHOE) - 0.5_RP * U_y(IRHO) * u2 - Q(IRHOU) * uy(1) - Q(IRHOV) * uy(2) - Q(IRHOW) * uy(3))
+         dp(3) = thermodynamics % gammaMinus1 * (U_z(IRHOE) - 0.5_RP * U_z(IRHO) * u2 - Q(IRHOU) * uz(1) - Q(IRHOV) * uz(2) - Q(IRHOW) * uz(3))
+      elseif (grad_vars == GRADVARS_ENERGY) then
+         p = Pressure(Q)
+         dp(1) = p / Q(IRHO) * U_x(IRHO) + Q(IRHO) / dimensionless % gammaM2 * U_x(IRHOE)
+         dp(2) = p / Q(IRHO) * U_y(IRHO) + Q(IRHO) / dimensionless % gammaM2 * U_y(IRHOE)
+         dp(3) = p / Q(IRHO) * U_z(IRHO) + Q(IRHO) / dimensionless % gammaM2 * U_z(IRHOE)
+      else ! grad_vars == GRADVARS_ENTROPY
+         p = Pressure(Q)
+         dp(1) = p / Q(IRHO) * (dot_product(Q, U_x) + p * U_x(IRHOE))
+         dp(2) = p / Q(IRHO) * (dot_product(Q, U_y) + p * U_y(IRHOE))
+         dp(3) = p / Q(IRHO) * (dot_product(Q, U_z) + p * U_z(IRHOE))
+      end if
+      x2 = dp(1)**2 + dp(2)**2 + dp(3)**2
+
+   end subroutine GMMFeatures_0D
 !
 !///////////////////////////////////////////////////////////////////////////////
 !
@@ -1280,5 +1346,58 @@ module SCsensorClass
       end select
 
    end function GetSensedVariable
+!
+!///////////////////////////////////////////////////////////////////////////////
+!
+   function GetSensedVariable_0D(varType, Q, U_x, U_y, U_z) result(s)
+!
+!     GetSensedVariable for the device: explicit sizes, and the velocity gradients
+!     through the selector instead of the procedure pointer
+!
+      !$acc routine seq
+      implicit none
+      integer,  intent(in) :: varType
+      real(RP), intent(in) :: Q(NCONS)
+      real(RP), intent(in) :: U_x(NGRAD)
+      real(RP), intent(in) :: U_y(NGRAD)
+      real(RP), intent(in) :: U_z(NGRAD)
+      real(RP)             :: s
+      real(RP) :: ux(3), uy(3), uz(3)
+
+      select case (varType)
+      case (SC_RHO_ID)
+         s = Q(IRHO)
+      case (SC_RHOU_ID)
+         s = Q(IRHOU)
+      case (SC_RHOV_ID)
+         s = Q(IRHOV)
+      case (SC_RHOW_ID)
+         s = Q(IRHOW)
+      case (SC_RHOE_ID)
+         s = Q(IRHOE)
+      case (SC_U_ID)
+         s = Q(IRHOU) / Q(IRHO)
+      case (SC_V_ID)
+         s = Q(IRHOV) / Q(IRHO)
+      case (SC_W_ID)
+         s = Q(IRHOW) / Q(IRHO)
+      case (SC_P_ID)
+         s = Pressure(Q)
+      case (SC_RHOP_ID)
+         s = Pressure(Q) * Q(IRHO)
+      case (SC_RHO_GRAD_ID)
+         if ( grad_vars == GRADVARS_ENTROPY ) then
+            s = POW2(dot_product(Q, U_x)) + POW2(dot_product(Q, U_y)) + POW2(dot_product(Q, U_z))
+         else ! STATE or ENERGY: d(rho)/dx stored directly in U_x(IRHO)
+            s = POW2(U_x(IRHO)) + POW2(U_y(IRHO)) + POW2(U_z(IRHO))
+         end if
+      case (SC_DIVV_ID)
+         call getVelocityGradients_selector(Q, U_x, U_y, U_z, ux, uy, uz)
+         s = (ux(1) + uy(2) + uz(3))**2
+      case default
+         s = 0.0_RP
+      end select
+
+   end function GetSensedVariable_0D
 
 end module SCsensorClass

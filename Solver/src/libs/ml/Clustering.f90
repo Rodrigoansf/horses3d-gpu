@@ -186,6 +186,7 @@ module Clustering
       real(RP)                      :: zerotol         ! Almost-zero tolerance
       real(RP)                      :: logL
       real(RP), allocatable         :: prob(:,:)       ! [p,n]: probability matrix
+      logical                       :: prob_on_device = .false.
       real(RP), pointer, contiguous :: centroids(:,:)  ! [d,n]: centroids of the clusters
       type(GaussianList_t)          :: g
       type(kMeans_t)                :: kmeans
@@ -807,6 +808,11 @@ module Clustering
       !   if (allocated(self % prob))         deallocate(self % prob)
       end if
 
+      if (self % prob_on_device) then
+         !$acc exit data delete(self % prob)
+         self % prob_on_device = .false.
+      end if
+
       call kMeans_final(self % kmeans)
 
       self % initialized = .false.
@@ -815,18 +821,20 @@ module Clustering
 !
 !///////////////////////////////////////////////////////////////////////////////
 !
-   subroutine GMM_fit(self, x, info, centroids, reset, adapt, from_kmeans)
+   subroutine GMM_fit(self, x, info, centroids, reset, adapt, from_kmeans, on_device)
 !
 !     ---------
 !     Interface
 !     ---------
       class(GMM_t),       intent(inout) :: self
-      real(RP),           intent(in)    :: x(:,:)
+      real(RP),           intent(inout) :: x(:,:)   ! inout: its host copy is updated on the device path
       integer,  optional, intent(out)   :: info
       real(RP), optional, intent(in)    :: centroids(self % ndims, self % max_nclusters)
       logical,  optional, intent(in)    :: reset
       logical,  optional, intent(in)    :: adapt
       logical,  optional, intent(in)    :: from_kmeans
+      logical,  optional, intent(in)    :: on_device   ! x on the device (OpenACC); the k-means
+                                                      ! steps use its host copy
 !
 !     ---------------
 !     Local variables
@@ -840,6 +848,7 @@ module Clustering
       real(RP)              :: mudiff
       real(RP), allocatable :: minimum(:), maximum(:)
       integer               :: ierr
+      logical               :: dev
 
 !
 !     Checks
@@ -869,6 +878,12 @@ module Clustering
          kmeans_ = .false.
       end if
 
+      dev = .false.
+      if (present(on_device)) dev = on_device
+      if (dev .and. kmeans_) then
+         !$acc update self(x)
+      end if
+
       if (present(centroids)) then
          call GMM_reset(self, centroids=centroids, use_kmeans=kmeans_, x=x)
       else
@@ -877,8 +892,13 @@ module Clustering
 !
 !     Minimum distance between cluster centroids
 !     ------------------------------------------
-      minimum = minval(x, dim=2)
-      maximum = maxval(x, dim=2)
+      if (dev) then
+         allocate(minimum(self % ndims), maximum(self % ndims))
+         call minmax_acc(self % ndims, size(x, dim=2), x, minimum, maximum)
+      else
+         minimum = minval(x, dim=2)
+         maximum = maxval(x, dim=2)
+      end if
 
       call MPI_MinMax(minimum, maximum)
 
@@ -891,11 +911,19 @@ module Clustering
 
       if (allocated(self % prob)) then
          if (size(self % prob, dim=1) /= npts) then
+            if (self % prob_on_device) then
+               !$acc exit data delete(self % prob)
+               self % prob_on_device = .false.
+            end if
             deallocate(self % prob)
             allocate(self % prob(npts, self % nclusters))
          end if
       else
          allocate(self % prob(npts, self % nclusters))
+      end if
+      if (dev .and. .not. self % prob_on_device) then
+         !$acc enter data copyin(self % prob)
+         self % prob_on_device = .true.
       end if
 !
 !     EM algorithm
@@ -907,8 +935,13 @@ module Clustering
                 prob      => self % prob       )
 
          llprev = ll
-         call GMM_Estep(ndims, npts, nclusters, self % g, x, prob(:,1:nclusters), ll)
-         call GMM_Mstep(ndims, npts, nclusters, self % g, x, prob(:,1:nclusters), self % zerotol)
+         if (dev) then
+            call GMM_Estep_acc(ndims, npts, nclusters, self % g, x, prob(:,1:nclusters), ll)
+            call GMM_Mstep_acc(ndims, npts, nclusters, self % g, x, prob(:,1:nclusters), self % zerotol)
+         else
+            call GMM_Estep(ndims, npts, nclusters, self % g, x, prob(:,1:nclusters), ll)
+            call GMM_Mstep(ndims, npts, nclusters, self % g, x, prob(:,1:nclusters), self % zerotol)
+         end if
 
          if (present(adapt)) then
             if (adapt) call GMM_adapt_clusters(ndims, nclusters, self % g, mudiff, info_)
@@ -930,6 +963,9 @@ module Clustering
       if (iter > self % maxiters) then
          associate(ndims => self % ndims, nclusters => self % nclusters)
             call self % kmeans % init(ndims, nclusters, self % maxiters)
+            if (dev) then
+               !$acc update self(x)
+            end if
             call self % kmeans % fit(x, info=info_, centroids=self % centroids(:,1:nclusters))
             self % centroids(:,1:nclusters) = self % kmeans % centroids
             self % with_kmeans = .true.
@@ -956,7 +992,7 @@ module Clustering
 !
 !///////////////////////////////////////////////////////////////////////////////
 !
-   subroutine GMM_predict(self, x, info)
+   subroutine GMM_predict(self, x, info, on_device)
 !
 !     ---------
 !     Interface
@@ -964,6 +1000,7 @@ module Clustering
       class(GMM_t),      intent(inout) :: self
       real(RP),          intent(in)    :: x(:,:)  ! [ndims, npts]
       integer, optional, intent(out)   :: info
+      logical, optional, intent(in)    :: on_device   ! x and prob on the device (OpenACC)
 !
 !     ---------------
 !     Local variables
@@ -977,10 +1014,13 @@ module Clustering
       real(RP) :: covinv(size(x, dim=1), size(x, dim=1))
       real(RP) :: logdet
       real(RP) :: lognorm
+      logical  :: dev
 
 !
 !     Checks
 !     ------
+      dev = .false.
+      if (present(on_device)) dev = on_device
       ndims = size(x, dim=1)
       if (self % ndims /= ndims) then
          if (present(info)) info = -1
@@ -1001,6 +1041,13 @@ module Clustering
             self % prob(i,j) = 1.0_RP
          end do
 !$omp end parallel do
+         if (dev .and. self % prob_on_device) then
+            !$acc update device(self % prob)
+         end if
+
+      else if (dev) then
+
+         call GMM_predict_acc(ndims, npts, nclusters, size(self % prob, dim=2), self % g, x, self % prob)
 
       else
 
@@ -1219,6 +1266,232 @@ module Clustering
       end do
 
    end subroutine GMM_Mstep
+!
+!///////////////////////////////////////////////////////////////////////////////
+!
+   subroutine GMM_Estep_acc(ndims, npts, nclusters, g, x, R, logL)
+!
+!     GMM_Estep with x and R on the device
+!
+      integer,              intent(in)    :: ndims
+      integer,              intent(in)    :: npts
+      integer,              intent(in)    :: nclusters
+      type(GaussianList_t), intent(in)    :: g
+      real(RP),             intent(in)    :: x(ndims, npts)
+      real(RP),             intent(inout) :: R(npts, nclusters)
+      real(RP),             intent(out)   :: logL
+      integer  :: i, j
+      integer  :: ierr
+      real(RP) :: logtau(nclusters), mu(ndims, nclusters), covinv(ndims, ndims, nclusters), logdet(nclusters)
+      real(RP) :: m, lse, lognorm, ll
+
+      logtau = g % logtau(1:nclusters)
+      mu     = g % mu(:,1:nclusters)
+      covinv = g % covinv(:,:,1:nclusters)
+      logdet = g % logdet(1:nclusters)
+
+      ll = 0.0_RP
+      !$acc parallel loop gang vector present(x, R) copyin(logtau, mu, covinv, logdet) &
+      !$acc&              private(m, lse, lognorm) reduction(+:ll)
+      do i = 1, npts
+         !$acc loop seq
+         do j = 1, nclusters
+            R(i,j) = GMM_logpdf_0D(ndims, x(:,i), logtau(j), mu(:,j), covinv(:,:,j), logdet(j))
+         end do
+!
+!        logsumexp(R(i,:))
+         m = R(i,1)
+         !$acc loop seq
+         do j = 2, nclusters
+            m = max(m, R(i,j))
+         end do
+         lse = 0.0_RP
+         !$acc loop seq
+         do j = 1, nclusters
+            lse = lse + exp(R(i,j) - m)
+         end do
+         lognorm = m + log(lse)
+
+         !$acc loop seq
+         do j = 1, nclusters
+            R(i,j) = exp(R(i,j) - lognorm)
+         end do
+         ll = ll + lognorm
+      end do
+      logL = ll
+
+#if defined(_HAS_MPI_)
+      if (MPI_Process % isRoot) then
+         call MPI_Reduce(MPI_IN_PLACE, logL, 1, MPI_DOUBLE, MPI_SUM, 0, MPI_COMM_WORLD, ierr)
+      else
+         call MPI_Reduce(logL, logL, 1, MPI_DOUBLE, MPI_SUM, 0, MPI_COMM_WORLD, ierr)
+      end if
+#endif
+
+   end subroutine GMM_Estep_acc
+!
+!///////////////////////////////////////////////////////////////////////////////
+!
+   subroutine GMM_Mstep_acc(ndims, npts, nclusters, g, x, R, covtol)
+!
+!     GMM_Mstep with x and R on the device: the sums over the points run there
+!
+      integer,              intent(in)    :: ndims
+      integer,              intent(in)    :: npts
+      integer,              intent(in)    :: nclusters
+      type(GaussianList_t), intent(inout) :: g
+      real(RP),             intent(in)    :: x(ndims, npts)
+      real(RP),             intent(in)    :: R(npts, nclusters)
+      real(RP),             intent(in)    :: covtol
+      integer  :: i, j, l, m
+      real(RP) :: ns(nclusters)
+      real(RP) :: inv_ns(nclusters)
+      real(RP) :: sx(ndims, nclusters)
+      real(RP) :: mu(ndims, nclusters)
+      real(RP) :: scov(ndims, ndims, nclusters)
+      real(RP) :: inv_sumtau
+      real(RP) :: det
+!
+!     "Number of points" and centroid of each cluster
+!     -----------------------------------------------
+      ns = 0.0_RP
+      sx = 0.0_RP
+      !$acc parallel loop gang vector present(x, R) reduction(+:ns, sx)
+      do i = 1, npts
+         !$acc loop seq
+         do j = 1, nclusters
+            ns(j) = ns(j) + R(i,j)
+            !$acc loop seq
+            do l = 1, ndims
+               sx(l,j) = sx(l,j) + x(l,i) * R(i,j)
+            end do
+         end do
+      end do
+
+      call MPI_SumAll(ns)
+      ns = ns + 10.0_RP * epsilon(1.0_RP)  ! Avoid div by 0. Factor taken from scikit
+      inv_ns = 1.0_RP / ns
+
+      do j = 1, nclusters
+         g % logtau(j) = ns(j)   ! No scaling yet
+         g % mu(:,j) = sx(:,j) * inv_ns(j)
+      end do
+      call MPI_SumAll(g % mu(:,1:nclusters))
+!
+!     Covariance matrices
+!     -------------------
+      mu = g % mu(:,1:nclusters)
+      scov = 0.0_RP
+      !$acc parallel loop gang vector present(x, R) copyin(mu) reduction(+:scov)
+      do i = 1, npts
+         !$acc loop seq
+         do j = 1, nclusters
+            !$acc loop seq
+            do m = 1, ndims
+               !$acc loop seq
+               do l = 1, ndims
+                  scov(l,m,j) = scov(l,m,j) + R(i,j) * (x(l,i) - mu(l,j)) * (x(m,i) - mu(m,j))
+               end do
+            end do
+         end do
+      end do
+
+      do j = 1, nclusters
+         g % cov(:,:,j) = scov(:,:,j) * inv_ns(j)
+      end do
+      call MPI_SumAll(g % cov(:,:,1:nclusters))
+!
+!     As in GMM_Mstep
+!     ---------------
+      inv_sumtau = 1.0_RP / sum(g % logtau(1:nclusters))
+      do j = 1, nclusters
+         do l = 1, ndims
+            g % cov(l,l,j) = g % cov(l,l,j) + covtol
+         end do
+         call matinv(ndims, g % cov(:,:,j), g % covinv(:,:,j), det)
+         g % logdet(j) = log(det)
+         g % logtau(j) = log(g % logtau(j) * inv_sumtau)
+      end do
+
+   end subroutine GMM_Mstep_acc
+!
+!///////////////////////////////////////////////////////////////////////////////
+!
+   subroutine GMM_predict_acc(ndims, npts, nclusters, ncols, g, x, prob)
+!
+!     The probabilities of GMM_predict with x and prob on the device. As there, the
+!     normalization runs over all the columns of prob.
+!
+      integer,              intent(in)    :: ndims
+      integer,              intent(in)    :: npts
+      integer,              intent(in)    :: nclusters
+      integer,              intent(in)    :: ncols
+      type(GaussianList_t), intent(in)    :: g
+      real(RP),             intent(in)    :: x(ndims, npts)
+      real(RP),             intent(inout) :: prob(npts, ncols)
+      integer  :: i, j
+      real(RP) :: logtau(nclusters), mu(ndims, nclusters), covinv(ndims, ndims, nclusters), logdet(nclusters)
+      real(RP) :: m, lse, lognorm
+
+      logtau = g % logtau(1:nclusters)
+      mu     = g % mu(:,1:nclusters)
+      covinv = g % covinv(:,:,1:nclusters)
+      logdet = g % logdet(1:nclusters)
+
+      !$acc parallel loop gang vector present(x, prob) copyin(logtau, mu, covinv, logdet) private(m, lse, lognorm)
+      do i = 1, npts
+         !$acc loop seq
+         do j = 1, nclusters
+            prob(i,j) = GMM_logpdf_0D(ndims, x(:,i), logtau(j), mu(:,j), covinv(:,:,j), logdet(j))
+         end do
+         m = prob(i,1)
+         !$acc loop seq
+         do j = 2, ncols
+            m = max(m, prob(i,j))
+         end do
+         lse = 0.0_RP
+         !$acc loop seq
+         do j = 1, ncols
+            lse = lse + exp(prob(i,j) - m)
+         end do
+         lognorm = m + log(lse)
+
+         !$acc loop seq
+         do j = 1, ncols
+            prob(i,j) = exp(prob(i,j) - lognorm)
+         end do
+      end do
+
+   end subroutine GMM_predict_acc
+!
+!///////////////////////////////////////////////////////////////////////////////
+!
+   function GMM_logpdf_0D(ndims, x, logtau, mu, Sinv, logdet) result(lp)
+!
+!     GMM_logpdf for the device
+!
+      !$acc routine seq
+      integer,  intent(in) :: ndims
+      real(RP), intent(in) :: x(ndims)
+      real(RP), intent(in) :: logtau
+      real(RP), intent(in) :: mu(ndims)
+      real(RP), intent(in) :: Sinv(ndims, ndims)
+      real(RP), intent(in) :: logdet
+      real(RP)             :: lp
+      integer  :: l, k
+      real(RP) :: q, v
+
+      q = 0.0_RP
+      do l = 1, ndims
+         v = 0.0_RP
+         do k = 1, ndims
+            v = v + Sinv(l,k) * (x(k) - mu(k))
+         end do
+         q = q + (x(l) - mu(l)) * v
+      end do
+      lp = logtau - 0.5_RP * (ndims * LOG2PI + logdet + q)
+
+   end function GMM_logpdf_0D
 !
 !///////////////////////////////////////////////////////////////////////////////
 !
@@ -1663,7 +1936,7 @@ module Clustering
 !
 !///////////////////////////////////////////////////////////////////////////////
 !
-   subroutine rescale(x, s, o)
+   subroutine rescale(x, s, o, on_device)
 !
 !     ---------
 !     Interface
@@ -1671,6 +1944,7 @@ module Clustering
       real(RP),           intent(inout) :: x(:,:)
       real(RP), optional, intent(in)    :: s
       real(RP), optional, intent(in)    :: o
+      logical,  optional, intent(in)    :: on_device   ! x on the device (OpenACC)
 !
 !     ---------------
 !     Local variables
@@ -1678,6 +1952,7 @@ module Clustering
       integer  :: ndims
       real(RP) :: factor
       real(RP) :: offset
+      logical  :: dev
 
 
       ndims = size(x, dim=1)
@@ -1694,7 +1969,13 @@ module Clustering
          offset = 0.0_RP
       end if
 
-      call rescale_(ndims, x, factor, offset)
+      dev = .false.
+      if (present(on_device)) dev = on_device
+      if (dev) then
+         call rescale_acc(ndims, size(x, dim=2), x, factor, offset)
+      else
+         call rescale_(ndims, x, factor, offset)
+      end if
 
    end subroutine rescale
 
@@ -1739,5 +2020,75 @@ module Clustering
       end do
 
    end subroutine rescale_
+!
+!///////////////////////////////////////////////////////////////////////////////
+!
+   subroutine minmax_acc(ndims, npts, x, minimum, maximum)
+!
+!     minval and maxval of x along dim 2, with x on the device
+!
+      integer,  intent(in)  :: ndims
+      integer,  intent(in)  :: npts
+      real(RP), intent(in)  :: x(ndims, npts)
+      real(RP), intent(out) :: minimum(ndims)
+      real(RP), intent(out) :: maximum(ndims)
+      integer :: i, l
+
+      minimum =  huge(1.0_RP)
+      maximum = -huge(1.0_RP)
+      !$acc parallel loop gang vector present(x) reduction(min:minimum) reduction(max:maximum)
+      do i = 1, npts
+         !$acc loop seq
+         do l = 1, ndims
+            minimum(l) = min(minimum(l), x(l,i))
+            maximum(l) = max(maximum(l), x(l,i))
+         end do
+      end do
+
+   end subroutine minmax_acc
+!
+!///////////////////////////////////////////////////////////////////////////////
+!
+   subroutine rescale_acc(ndims, npts, x, scale, offset)
+!
+!     rescale_ with x on the device
+!
+      use Utilities, only: AlmostEqual
+      integer,  intent(in)    :: ndims
+      integer,  intent(in)    :: npts
+      real(RP), intent(inout) :: x(ndims, npts)
+      real(RP), intent(in)    :: scale
+      real(RP), intent(in)    :: offset
+      integer  :: i, l
+      logical  :: flat(ndims)
+      real(RP) :: minimum(ndims)
+      real(RP) :: maximum(ndims)
+      real(RP) :: flatval(ndims)
+
+      call minmax_acc(ndims, npts, x, minimum, maximum)
+      call MPI_MinMax(minimum, maximum)
+
+      do l = 1, ndims
+         flat(l) = AlmostEqual(maximum(l), minimum(l))
+         if (maximum(l) > 0.0_RP) then
+            flatval(l) = scale + offset
+         else
+            flatval(l) = offset
+         end if
+      end do
+
+      !$acc parallel loop gang vector present(x) copyin(flat, flatval, minimum, maximum)
+      do i = 1, npts
+         !$acc loop seq
+         do l = 1, ndims
+            if (flat(l)) then
+               x(l,i) = flatval(l)
+            else
+               x(l,i) = (x(l,i) - minimum(l)) / (maximum(l) - minimum(l)) * scale + offset
+            end if
+         end do
+      end do
+
+   end subroutine rescale_acc
 
 end module Clustering

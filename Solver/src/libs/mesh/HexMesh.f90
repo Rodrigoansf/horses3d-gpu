@@ -1302,9 +1302,8 @@ slavecoord:             DO l = 1, 4
 !        ---------------
 !
          integer            :: mpifID, fID, thisSide, domain
-         integer            :: i, j, counter
+         integer            :: i, j, counter, offset
          integer            :: ierr
-         integer, parameter :: otherSide(2) = (/2,1/)
 
          if ( .not. MPI_Process % doMPIAction ) return
 !
@@ -1317,9 +1316,10 @@ slavecoord:             DO l = 1, 4
          end do
 !
 !        Wait for SC_ProlongAviscFluxToFaces (queue 1); this side of the MPI faces
-!        is sent to the host below
+!        is packed on the device
 !        -------------------------------------------------------------------------
          !$acc wait(1)
+         call HexMesh_SetAviscFluxOffsets(self)
 !
 !        ***********
 !        Send H flux
@@ -1331,23 +1331,23 @@ slavecoord:             DO l = 1, 4
 !           Gather solution
 !           ---------------
 !
-            counter = 1
             if ( self % MPIfaces % faces(domain) % no_of_faces .eq. 0 ) cycle
 !           Wait until the neighbour has received the previous AviscFluxSend before refilling it
             call mpi_wait(self % MPIfaces % faces(domain) % AviscFluxSend_req, MPI_STATUS_IGNORE, ierr)
 
+            !$acc parallel loop gang present(self) private(fID, thisSide, offset)
             do mpifID = 1, self % MPIfaces % faces(domain) % no_of_faces
                fID = self % MPIfaces % faces(domain) % faceIDs(mpifID)
                thisSide = self % MPIfaces % faces(domain) % elementSide(mpifID)
-               !$acc update self(self % faces(fID) % storage(thisSide) % AviscFlux)
-               associate(f => self % faces(fID))
-               do j = 0, f % Nf(2)  ; do i = 0, f % Nf(1)
+               offset = self % MPIfaces % faces(domain) % faceOffset(mpifID)
+               !$acc loop vector collapse(2) private(counter)
+               do j = 0, self % faces(fID) % Nf(2)  ; do i = 0, self % faces(fID) % Nf(1)
+                  counter = (offset + j * (self % faces(fID) % Nf(1) + 1) + i) * nEqn + 1
                   self % MPIfaces % faces(domain) % AviscFluxSend(counter:counter+nEqn-1) = &
-                     f % storage(thisSide) % AviscFlux(:,i,j)
-                  counter = counter + nEqn
+                     self % faces(fID) % storage(thisSide) % AviscFlux(1:nEqn,i,j)
                end do               ; end do
-               end associate
             end do
+            !$acc end parallel loop
 !
 !           -------------
 !           Send solution
@@ -1357,6 +1357,34 @@ slavecoord:             DO l = 1, 4
          end do
 #endif
       end subroutine HexMesh_UpdateMPIFacesAviscFlux
+!
+!////////////////////////////////////////////////////////////////////////
+!
+      subroutine HexMesh_SetAviscFluxOffsets(self)
+!
+!        Nodes before each MPI face in the AV flux buffers, face after face, where
+!        HexMesh_UpdateMPIFacesAviscFlux packs and HexMesh_GatherMPIFacesAviscflux
+!        unpacks them. Computed once: with OpenACC in HexMesh_CreateDeviceData, before
+!        the MPI faces go to the device (MPIFaces_CreateMPIFacesStorage copies them).
+!
+         implicit none
+         class(HexMesh) :: self
+#ifdef _HAS_MPI_
+         integer :: domain, mpifID, fID, n
+
+         do domain = 1, MPI_Process % nProcs
+            if ( allocated(self % MPIfaces % faces(domain) % faceOffset) ) cycle
+
+            allocate(self % MPIfaces % faces(domain) % faceOffset(self % MPIfaces % faces(domain) % no_of_faces))
+            n = 0
+            do mpifID = 1, self % MPIfaces % faces(domain) % no_of_faces
+               fID = self % MPIfaces % faces(domain) % faceIDs(mpifID)
+               self % MPIfaces % faces(domain) % faceOffset(mpifID) = n
+               n = n + (self % faces(fID) % Nf(1) + 1) * (self % faces(fID) % Nf(2) + 1)
+            end do
+         end do
+#endif
+      end subroutine HexMesh_SetAviscFluxOffsets
 !
 !////////////////////////////////////////////////////////////////////////
 !
@@ -1553,10 +1581,11 @@ slavecoord:             DO l = 1, 4
 !        ---------------
 !
          integer            :: mpifID, fID, thisSide, domain
-         integer            :: i, j, counter
+         integer            :: i, j, counter, offset
          integer, parameter :: otherSide(2) = [2, 1]
 
          if ( .not. MPI_Process % doMPIAction ) return
+         call HexMesh_SetAviscFluxOffsets(self)
 !
 !        ***************
 !        Gather solution
@@ -1573,22 +1602,19 @@ slavecoord:             DO l = 1, 4
 !
             call self % MPIfaces % faces(domain) % WaitForAviscflux
 
-            counter = 1
+            !$acc parallel loop gang present(self) private(fID, thisSide, offset)
             do mpifID = 1, self % MPIfaces % faces(domain) % no_of_faces
                fID = self % MPIfaces % faces(domain) % faceIDs(mpifID)
                thisSide = self % MPIfaces % faces(domain) % elementSide(mpifID)
-               associate(f => self % faces(fID))
-               do j = 0, f % Nf(2)  ; do i = 0, f % Nf(1)
-                  f % storage(otherSide(thisSide)) % Aviscflux(:,i,j) = &
-                     self % MPIfaces % faces(domain) % AviscfluxRecv(counter:counter+nEqn-1)
-                  counter = counter + nEqn
+               offset = self % MPIfaces % faces(domain) % faceOffset(mpifID)
+               !$acc loop vector collapse(2) private(counter)
+               do j = 0, self % faces(fID) % Nf(2)  ; do i = 0, self % faces(fID) % Nf(1)
+                  counter = (offset + j * (self % faces(fID) % Nf(1) + 1) + i) * nEqn + 1
+                  self % faces(fID) % storage(otherSide(thisSide)) % AviscFlux(1:nEqn,i,j) = &
+                     self % MPIfaces % faces(domain) % AviscFluxRecv(counter:counter+nEqn-1)
                end do               ; end do
-               end associate
-!
-!              The neighbour's flux is used on the device
-!              ------------------------------------------
-               !$acc update device(self % faces(fID) % storage(otherSide(thisSide)) % AviscFlux)
             end do
+            !$acc end parallel loop
          end do
 #endif
       end subroutine HexMesh_GatherMPIFacesAviscflux
@@ -4669,6 +4695,7 @@ slavecoord:             DO l = 1, 4
 #ifdef _HAS_MPI_
       !$acc enter data copyin(self % faces_mpi)
       !$acc enter data copyin(self % elements_mpi)
+      call HexMesh_SetAviscFluxOffsets(self)
       call MPIFaces_CreateMPIFacesStorage(self % MPIfaces)
 #endif
       print*, "I am done allocating the device data"

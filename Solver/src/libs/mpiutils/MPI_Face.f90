@@ -22,6 +22,7 @@ module MPI_Face_Class
       integer                    :: no_of_faces
       integer, allocatable       :: faceIDs(:)
       integer, allocatable       :: elementSide(:)
+      integer, allocatable       :: faceOffset(:)    ! nodes before each face in the AV flux buffers
       integer                    :: Nrecv_req
       integer                    :: Qrecv_req
       integer                    :: gradQrecv_req
@@ -169,6 +170,7 @@ module MPI_Face_Class
                   !$acc enter data copyin(facesSet % faces(domain))
                   !$acc enter data copyin(facesSet % faces(domain) % faceIDs)
                   !$acc enter data copyin(facesSet % faces(domain) % elementSide)
+                  !$acc enter data copyin(facesSet % faces(domain) % faceOffset)
                if ( facesSet % faces(domain) % nDOFs .gt. 0 ) then
                   !$acc enter data copyin(facesSet % faces(domain) % Qsend)
                   !$acc enter data copyin(facesSet % faces(domain) % U_xyzsend)
@@ -335,8 +337,10 @@ module MPI_Face_Class
 
 #ifdef _HAS_MPI_
          if ( self % no_of_faces .gt. 0 ) then
+            !$acc host_data use_device(self % AviscFluxSend)
             call mpi_isend(self % AviscFluxSend, nEqn * self % nDOFs, MPI_DOUBLE, domain-1, &
                            DEFAULT_TAG, MPI_COMM_WORLD, self % AviscFluxSend_req, ierr)
+            !$acc end host_data
          end if
 #endif
 
@@ -356,8 +360,10 @@ module MPI_Face_Class
 
 #ifdef _HAS_MPI_
          if ( self % no_of_faces .gt. 0 ) then
+            !$acc host_data use_device(self % AviscFluxRecv)
             call mpi_irecv(self % AviscFluxRecv, nEqn * self % nDOFs, MPI_DOUBLE, domain-1, &
                            MPI_ANY_TAG, MPI_COMM_WORLD, self % AviscFluxRecv_req, ierr)
+            !$acc end host_data
          end if
 #endif
 
@@ -640,6 +646,7 @@ module MPI_Face_Class
                if ( facesSet % faces(domain) % nDOFs .gt. 0 ) then
                   !$acc exit data delete(facesSet % faces(domain) % faceIDs)
                   !$acc exit data delete(facesSet % faces(domain) % elementSide)
+                  !$acc exit data delete(facesSet % faces(domain) % faceOffset)
                   !$acc exit data delete(facesSet % faces(domain) % nDOFs)
                   !$acc exit data delete(facesSet % faces(domain) % no_of_faces)
                   !$acc exit data delete(facesSet % faces(domain) % sizeQ)
