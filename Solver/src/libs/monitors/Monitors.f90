@@ -35,8 +35,7 @@ module MonitorsClass
       integer                      , allocatable :: iter(:)
       integer                                    :: dt_restriction
       logical                                    :: write_dt_restriction
-      logical                                    :: volumeOnHost = .false.   ! a volume monitor integrates the solution on the host
-      logical                                    :: volumeQDot   = .false.   ! ... or QDot (rate and balance monitors)
+      logical                                    :: hostArrays(NO_OF_HOST_ARRAYS) = .false.   ! element arrays the volume monitors read on the host
       real(kind=RP)                , allocatable :: t(:)
       real(kind=RP)                , allocatable :: SolverSimuTime(:)
       real(kind=RP)                , allocatable :: TotalSimuTime(:)
@@ -71,6 +70,7 @@ module MonitorsClass
       subroutine Monitors_Construct( Monitors, mesh, controlVariables ) 
          use FTValueDictionaryClass
          use mainKeywordsModule
+         use Utilities, only: toLower
          implicit none
          class(Monitor_t)                     :: Monitors
          class(HexMesh), intent(in)           :: mesh
@@ -87,6 +87,7 @@ module MonitorsClass
          character(len=STR_LEN_MONITORS) :: solution_file                                            
          logical, save                   :: FirstCall = .TRUE.
          logical                         :: saveGradients
+         character(len=LINE_LENGTH)      :: sensor
 !
 !        Setup the buffer
 !        ----------------
@@ -137,19 +138,59 @@ module MonitorsClass
             call Monitors % volumeMonitors(i) % Initialization ( mesh , i, solution_file , FirstCall  )
          end do
 !
-!        Volume monitors that integrate the solution on the host (with OpenACC, the solution
-!        is copied there before them): all but the geometric ones, those computed on the
-!        device and those of shock-capturing data
-!        ---------------------------------------------------------------------------------
+!        Element arrays that the volume monitors read on the host (with OpenACC they are copied there
+!        before them), as in VolumeIntegrals: none for the geometric ones, those computed on the device and
+!        those of shock-capturing data; what SaveSolution copies (and QDot) for any other variable
+!        ---------------------------------------------------------------------------------------------------
          do i = 1 , Monitors % no_of_volumeMonitors
+            associate ( need => Monitors % hostArrays )
             select case ( trim(Monitors % volumeMonitors(i) % variable) )
             case ("volume", "velocity", "momentum", "source", "artificial dissipation", "sensor range")
+            case ("kinetic energy", "entropy", "math entropy", "internal energy", "mean velocity", "mass", &
+                  "phase2-area", "phase2-xcog", "phase2-xvel")
+               need(HOST_Q) = .true.
+            case ("kinetic energy rate", "entropy rate")
+               need([HOST_Q, HOST_QDOT]) = .true.
+#ifdef CAHNHILLIARD
+               need(HOST_MU) = .true.
+#endif
+            case ("enstrophy")
+               need([HOST_Q, HOST_U_X, HOST_U_Y, HOST_U_Z]) = .true.
+            case ("kinetic energy balance", "entropy balance")
+               need([HOST_Q, HOST_QDOT, HOST_U_X, HOST_U_Y, HOST_U_Z]) = .true.
+#ifdef CAHNHILLIARD
+               need(HOST_MU) = .true.
+#else
+               need(HOST_MU_NS) = .true.
+#endif
             case default
-               Monitors % volumeOnHost = .true.
+               need([HOST_Q, HOST_U_X, HOST_U_Y, HOST_U_Z, HOST_MU_NS, HOST_MU_TURB_NS]) = .true.
+#ifdef CAHNHILLIARD
+               need(HOST_MU) = .true.
+#endif
                if ( index(Monitors % volumeMonitors(i) % variable, "rate")    > 0 .or. &
-                    index(Monitors % volumeMonitors(i) % variable, "balance") > 0 ) Monitors % volumeQDot = .true.
+                    index(Monitors % volumeMonitors(i) % variable, "balance") > 0 ) need(HOST_QDOT) = .true.
             end select
+            end associate
          end do
+#ifdef NAVIERSTOKES
+!
+!        The shock-capturing sensor is computed on the host from the same copies (SCsensorClass): with a
+!        sensor that reads the solution, copy everything SaveSolution copies
+!        -------------------------------------------------------------------------------------------------
+         if ( any(Monitors % hostArrays) .and. controlVariables % containsKey("enable shock-capturing") ) then
+            if ( controlVariables % logicalValueForKey("enable shock-capturing") ) then
+               sensor = "integral"
+               if ( controlVariables % containsKey("shock sensor") ) then
+                  sensor = controlVariables % stringValueForKey("shock sensor", LINE_LENGTH)
+               end if
+               call toLower(sensor)
+               if ( trim(sensor) /= "zeros" .and. trim(sensor) /= "ones" ) then
+                  Monitors % hostArrays([HOST_Q, HOST_U_X, HOST_U_Y, HOST_U_Z, HOST_MU_NS, HOST_MU_TURB_NS]) = .true.
+               end if
+            end if
+         end if
+#endif
 
          allocate ( Monitors % loadBalancingMonitors ( Monitors % no_of_loadBalancingMonitors )  )
          !$acc update device(Monitors)
@@ -436,9 +477,9 @@ module MonitorsClass
          call self % residuals % Update( mesh, maxResiduals, self % bufferLine )
 #ifdef _OPENACC
 !
-!        Those of them that integrate on the host read the current solution
-!        -------------------------------------------------------------------
-         if ( self % volumeOnHost ) call mesh % UpdateHostData(withQDot = self % volumeQDot)
+!        Those of them that integrate on the host read the arrays they need there
+!        -------------------------------------------------------------------------
+         if ( any(self % hostArrays) ) call mesh % UpdateHostArrays(self % hostArrays)
 #endif
 !
 !        Update volume monitors
@@ -634,8 +675,7 @@ module MonitorsClass
          
          to % dt_restriction        = from % dt_restriction
          to % write_dt_restriction  = from % write_dt_restriction
-         to % volumeOnHost          = from % volumeOnHost
-         to % volumeQDot            = from % volumeQDot
+         to % hostArrays            = from % hostArrays
          
          safedeallocate (to % t)
          allocate (to % t (size (from % t) ) ) 

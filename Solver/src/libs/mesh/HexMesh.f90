@@ -44,12 +44,18 @@ MODULE HexMeshClass
       public      HexMesh_UpdateMPIFacesSolution, HexMesh_UpdateMPIFacesGradients
       public      HexMesh_GatherMPIFacesSolution, HexMesh_GatherMPIFacesGradients
       public      HexMesh_ComputeLocalGradientNS
+      public      HOST_Q, HOST_QDOT, HOST_U_X, HOST_U_Y, HOST_U_Z, HOST_MU_NS, HOST_MU_TURB_NS, HOST_MU, NO_OF_HOST_ARRAYS
 #ifdef INCNS
       public      HexMesh_ComputeLocalGradientiNS
 #endif
 #if defined(CAHNHILLIARD)
       public      HexMesh_ComputeLocalGradientCH, HexMesh_ComputeLocalGradientMU
 #endif
+!
+!     Element arrays that HexMesh_UpdateHostArrays copies to the host
+!     ---------------------------------------------------------------
+      integer, parameter :: HOST_Q = 1, HOST_QDOT = 2, HOST_U_X = 3, HOST_U_Y = 4, HOST_U_Z = 5, HOST_MU_NS = 6, &
+                            HOST_MU_TURB_NS = 7, HOST_MU = 8, NO_OF_HOST_ARRAYS = 8
 !
 !     ---------------
 !     Mesh definition
@@ -98,6 +104,7 @@ MODULE HexMeshClass
             procedure :: CreateDeviceData              => HexMesh_CreateDeviceData
             procedure :: ExitDeviceData                => HexMesh_ExitDeviceData
             procedure :: UpdateHostData                => HexMesh_UpdateHostData
+            procedure :: UpdateHostArrays              => HexMesh_UpdateHostArrays
             procedure :: UpdateFacesHostData           => HexMesh_UpdateFacesHostData
             procedure :: UpdateHostStatistics          => HexMesh_UpdateHostStatistics
             procedure :: ConstructZones                => HexMesh_ConstructZones
@@ -4815,22 +4822,14 @@ slavecoord:             DO l = 1, 4
  
    end subroutine HexMesh_ExitDeviceData
 
-   subroutine HexMesh_UpdateHostData(self, withQDot)
-!
-!     Copy the solution, its gradients and the viscosities to the host, and QDot with withQDot
-!
+   subroutine HexMesh_UpdateHostData(self)
       use Physics
       implicit none
       !-----------------------------------------------------------
       class(HexMesh)                  :: self
-      logical, optional, intent(in)   :: withQDot
       !-----------------------------------------------------------
       integer :: eID
-      logical :: qdot
       !-----------------------------------------------------------
-
-      qdot = .false.
-      if (present(withQDot)) qdot = withQDot
 
       !$acc wait
 
@@ -4844,14 +4843,59 @@ slavecoord:             DO l = 1, 4
 #ifdef CAHNHILLIARD
          !$acc update self(self % elements(eID) % storage % mu)
 #endif
-         if (qdot) then
-            !$acc update self(self % elements(eID) % storage % QDot)
-         end if
       enddo
       
       !$acc wait
 
    end subroutine HexMesh_UpdateHostData
+
+   subroutine HexMesh_UpdateHostArrays(self, arrays)
+!
+!     Copy to the host the element arrays flagged in arrays (HOST_Q, ...), each element's array in an
+!     asynchronous update, with one wait at the end
+!
+      implicit none
+      !-----------------------------------------------------------
+      class(HexMesh), intent(inout) :: self
+      logical,        intent(in)    :: arrays(NO_OF_HOST_ARRAYS)
+      !-----------------------------------------------------------
+      integer :: eID
+      !-----------------------------------------------------------
+
+      !$acc wait
+
+      do eID = 1, size(self % elements)
+         if (arrays(HOST_Q)) then
+            !$acc update self(self % elements(eID) % storage % Q) async(1)
+         end if
+         if (arrays(HOST_QDOT)) then
+            !$acc update self(self % elements(eID) % storage % QDot) async(1)
+         end if
+         if (arrays(HOST_U_X) .and. associated(self % elements(eID) % storage % U_x)) then
+            !$acc update self(self % elements(eID) % storage % U_x) async(1)
+         end if
+         if (arrays(HOST_U_Y) .and. associated(self % elements(eID) % storage % U_y)) then
+            !$acc update self(self % elements(eID) % storage % U_y) async(1)
+         end if
+         if (arrays(HOST_U_Z) .and. associated(self % elements(eID) % storage % U_z)) then
+            !$acc update self(self % elements(eID) % storage % U_z) async(1)
+         end if
+         if (arrays(HOST_MU_NS)) then
+            !$acc update self(self % elements(eID) % storage % mu_ns) async(1)
+         end if
+         if (arrays(HOST_MU_TURB_NS)) then
+            !$acc update self(self % elements(eID) % storage % mu_turb_NS) async(1)
+         end if
+#ifdef CAHNHILLIARD
+         if (arrays(HOST_MU)) then
+            !$acc update self(self % elements(eID) % storage % mu) async(1)
+         end if
+#endif
+      end do
+
+      !$acc wait(1)
+
+   end subroutine HexMesh_UpdateHostArrays
 
    subroutine HexMesh_UpdateFacesHostData(self)
       use Physics
