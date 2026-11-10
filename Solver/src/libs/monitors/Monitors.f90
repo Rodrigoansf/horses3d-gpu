@@ -35,6 +35,8 @@ module MonitorsClass
       integer                      , allocatable :: iter(:)
       integer                                    :: dt_restriction
       logical                                    :: write_dt_restriction
+      logical                                    :: volumeOnHost = .false.   ! a volume monitor integrates the solution on the host
+      logical                                    :: volumeQDot   = .false.   ! ... or QDot (rate and balance monitors)
       real(kind=RP)                , allocatable :: t(:)
       real(kind=RP)                , allocatable :: SolverSimuTime(:)
       real(kind=RP)                , allocatable :: TotalSimuTime(:)
@@ -133,6 +135,20 @@ module MonitorsClass
          !$acc update device(Monitors)
          do i = 1 , Monitors % no_of_volumeMonitors
             call Monitors % volumeMonitors(i) % Initialization ( mesh , i, solution_file , FirstCall  )
+         end do
+!
+!        Volume monitors that integrate the solution on the host (with OpenACC, the solution
+!        is copied there before them): all but the geometric ones, those computed on the
+!        device and those of shock-capturing data
+!        ---------------------------------------------------------------------------------
+         do i = 1 , Monitors % no_of_volumeMonitors
+            select case ( trim(Monitors % volumeMonitors(i) % variable) )
+            case ("volume", "velocity", "momentum", "source", "artificial dissipation", "sensor range")
+            case default
+               Monitors % volumeOnHost = .true.
+               if ( index(Monitors % volumeMonitors(i) % variable, "rate")    > 0 .or. &
+                    index(Monitors % volumeMonitors(i) % variable, "balance") > 0 ) Monitors % volumeQDot = .true.
+            end select
          end do
 
          allocate ( Monitors % loadBalancingMonitors ( Monitors % no_of_loadBalancingMonitors )  )
@@ -418,6 +434,12 @@ module MonitorsClass
 !        Compute current residuals
 !        -------------------------
          call self % residuals % Update( mesh, maxResiduals, self % bufferLine )
+#ifdef _OPENACC
+!
+!        Those of them that integrate on the host read the current solution
+!        -------------------------------------------------------------------
+         if ( self % volumeOnHost ) call mesh % UpdateHostData(withQDot = self % volumeQDot)
+#endif
 !
 !        Update volume monitors
 !        ----------------------
@@ -612,6 +634,8 @@ module MonitorsClass
          
          to % dt_restriction        = from % dt_restriction
          to % write_dt_restriction  = from % write_dt_restriction
+         to % volumeOnHost          = from % volumeOnHost
+         to % volumeQDot            = from % volumeQDot
          
          safedeallocate (to % t)
          allocate (to % t (size (from % t) ) ) 
