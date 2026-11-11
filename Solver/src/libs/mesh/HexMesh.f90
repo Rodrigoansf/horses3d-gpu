@@ -31,6 +31,11 @@ MODULE HexMeshClass
 #ifdef _HAS_MPI_
       use mpi
 #endif
+#ifdef _OPENACC
+      use cudafor                         , only: cuda_stream_kind, cudaMemcpyAsync, cudaStreamSynchronize, &
+                                                  cudaDeviceSynchronize, cudaSuccess
+      use openacc                         , only: acc_get_cuda_stream
+#endif
       IMPLICIT NONE
 
       private
@@ -44,11 +49,27 @@ MODULE HexMeshClass
       public      HexMesh_UpdateMPIFacesSolution, HexMesh_UpdateMPIFacesGradients
       public      HexMesh_GatherMPIFacesSolution, HexMesh_GatherMPIFacesGradients
       public      HexMesh_ComputeLocalGradientNS
+      public      HOST_Q, HOST_QDOT, HOST_U_X, HOST_U_Y, HOST_U_Z, HOST_MU_NS, HOST_MU_TURB_NS, HOST_MU, NO_OF_HOST_ARRAYS
 #ifdef INCNS
       public      HexMesh_ComputeLocalGradientiNS
 #endif
 #if defined(CAHNHILLIARD)
       public      HexMesh_ComputeLocalGradientCH, HexMesh_ComputeLocalGradientMU
+#endif
+!
+!     Element arrays that HexMesh_UpdateHostArrays copies to the host
+!     ---------------------------------------------------------------
+      integer, parameter :: HOST_Q = 1, HOST_QDOT = 2, HOST_U_X = 3, HOST_U_Y = 4, HOST_U_Z = 5, HOST_MU_NS = 6, &
+                            HOST_MU_TURB_NS = 7, HOST_MU = 8, NO_OF_HOST_ARRAYS = 8
+#ifdef _OPENACC
+!
+!     Its staging buffers: two slots on the device and in page-locked host memory, and the first node of
+!     each element (on the host and on the device)
+!
+      real(kind=RP), allocatable, device :: hostArraysDev(:)
+      real(kind=RP), allocatable, pinned :: hostArraysPinned(:)
+      integer,       allocatable         :: hostArraysFirst(:)
+      integer,       allocatable, device :: hostArraysFirstDev(:)
 #endif
 !
 !     ---------------
@@ -98,6 +119,7 @@ MODULE HexMeshClass
             procedure :: CreateDeviceData              => HexMesh_CreateDeviceData
             procedure :: ExitDeviceData                => HexMesh_ExitDeviceData
             procedure :: UpdateHostData                => HexMesh_UpdateHostData
+            procedure :: UpdateHostArrays              => HexMesh_UpdateHostArrays
             procedure :: UpdateFacesHostData           => HexMesh_UpdateFacesHostData
             procedure :: UpdateHostStatistics          => HexMesh_UpdateHostStatistics
             procedure :: ConstructZones                => HexMesh_ConstructZones
@@ -4810,27 +4832,23 @@ slavecoord:             DO l = 1, 4
       !$acc exit data delete (self % storage)
       !$acc exit data delete (self % elements)
       !$acc exit data delete (self)
+#ifdef _OPENACC
+      if (allocated(hostArraysDev))   deallocate(hostArraysDev, hostArraysPinned)
+      if (allocated(hostArraysFirst)) deallocate(hostArraysFirst, hostArraysFirstDev)
+#endif
 
       print*, "I am done de-allocating the device data"
  
    end subroutine HexMesh_ExitDeviceData
 
-   subroutine HexMesh_UpdateHostData(self, withQDot)
-!
-!     Copy the solution, its gradients and the viscosities to the host, and QDot with withQDot
-!
+   subroutine HexMesh_UpdateHostData(self)
       use Physics
       implicit none
       !-----------------------------------------------------------
       class(HexMesh)                  :: self
-      logical, optional, intent(in)   :: withQDot
       !-----------------------------------------------------------
       integer :: eID
-      logical :: qdot
       !-----------------------------------------------------------
-
-      qdot = .false.
-      if (present(withQDot)) qdot = withQDot
 
       !$acc wait
 
@@ -4844,14 +4862,386 @@ slavecoord:             DO l = 1, 4
 #ifdef CAHNHILLIARD
          !$acc update self(self % elements(eID) % storage % mu)
 #endif
-         if (qdot) then
-            !$acc update self(self % elements(eID) % storage % QDot)
-         end if
       enddo
       
       !$acc wait
 
    end subroutine HexMesh_UpdateHostData
+
+   subroutine HexMesh_UpdateHostArrays(self, arrays)
+!
+!     Copy to the host the element arrays flagged in arrays (HOST_Q, ...). Each array of a range of elements is
+!     packed on the device into a staging slot and moved in one transfer to page-locked memory, where it is
+!     unpacked into the elements while the other slot moves. The packing kernels read the arrays the device
+!     copies were attached to in CreateDeviceData, the Navier-Stokes ones: with the storage pointed to other
+!     arrays (multiphase between its equations) the copy goes element by element.
+!
+      implicit none
+      !-----------------------------------------------------------
+      class(HexMesh), intent(inout) :: self
+      logical,        intent(in)    :: arrays(NO_OF_HOST_ARRAYS)
+      !-----------------------------------------------------------
+#ifdef _OPENACC
+      integer, parameter :: MAX_SLOT  = 1048576    ! values per slot (8 MB): larger arrays move in parts
+      integer, parameter :: QUEUES(2) = [11, 12]   ! one per slot
+      integer :: nelem, eID, a, s, n, e1, e2, slot, istat
+      integer :: nv(NO_OF_HOST_ARRAYS), slotArray(2), slotFirst(2), slotLast(2)
+      integer, allocatable :: first(:)
+      logical :: onNS
+      !-----------------------------------------------------------
+
+      nelem = size(self % elements)
+      if (nelem == 0) return
+
+      onNS = .true.
+      do eID = 1, nelem
+         associate (st => self % elements(eID) % storage)
+         onNS = onNS .and. associated(st % Q, st % QNS) .and. associated(st % QDot, st % QDotNS)
+         if (associated(st % U_x)) onNS = onNS .and. associated(st % U_x, st % U_xNS) &
+                                               .and. associated(st % U_y, st % U_yNS) &
+                                               .and. associated(st % U_z, st % U_zNS)
+         end associate
+      end do
+      if (.not. onNS) then
+         call HexMesh_UpdateHostArraysByElement(self, arrays)
+         return
+      end if
+!
+!     Values per node of each array (0: not copied)
+!     ---------------------------------------------
+      nv = 0
+      associate (st => self % elements(1) % storage)
+      if (arrays(HOST_Q))          nv(HOST_Q)          = size(st % Q, 1)
+      if (arrays(HOST_QDOT))       nv(HOST_QDOT)       = size(st % QDot, 1)
+      if (associated(st % U_x)) then
+         if (arrays(HOST_U_X))     nv(HOST_U_X)        = size(st % U_x, 1)
+         if (arrays(HOST_U_Y))     nv(HOST_U_Y)        = size(st % U_y, 1)
+         if (arrays(HOST_U_Z))     nv(HOST_U_Z)        = size(st % U_z, 1)
+      end if
+      if (arrays(HOST_MU_NS))      nv(HOST_MU_NS)      = size(st % mu_NS, 1)
+      if (arrays(HOST_MU_TURB_NS)) nv(HOST_MU_TURB_NS) = 1
+#ifdef CAHNHILLIARD
+      if (arrays(HOST_MU))         nv(HOST_MU)         = size(st % mu, 1)
+#endif
+      end associate
+
+      !$acc wait
+!
+!     First node of each element (kept on the device), and the slots: the largest array, at most
+!     MAX_SLOT values, at least one element
+!     ------------------------------------------------------------------------------------------
+      allocate(first(nelem + 1))
+      first(1) = 0
+      do eID = 1, nelem
+         first(eID + 1) = first(eID) + product(self % elements(eID) % Nxyz + 1)
+      end do
+      if (allocated(hostArraysFirst)) then
+         if (size(hostArraysFirst) /= nelem + 1) deallocate(hostArraysFirst, hostArraysFirstDev)
+      end if
+      if (.not. allocated(hostArraysFirst)) then
+         allocate(hostArraysFirst(nelem + 1), hostArraysFirstDev(nelem + 1))
+         hostArraysFirst = -1
+      end if
+      if (any(hostArraysFirst /= first)) then
+         hostArraysFirst = first
+         hostArraysFirstDev = hostArraysFirst
+         istat = cudaDeviceSynchronize()
+      end if
+
+      slot = max(min(maxval(nv) * first(nelem + 1), MAX_SLOT), maxval(nv) * maxval(first(2:) - first(:nelem)))
+      if (allocated(hostArraysDev)) then
+         if (size(hostArraysDev) < 2 * slot) deallocate(hostArraysDev, hostArraysPinned)
+      end if
+      if (.not. allocated(hostArraysDev)) allocate(hostArraysDev(2 * slot), hostArraysPinned(2 * slot))
+!
+!     Each array in ranges of elements that fit in a slot: pack and send one while the other slot, sent
+!     before, is unpacked
+!     -------------------------------------------------------------------------------------------------
+      slotArray = 0
+      s = 1
+      do a = 1, NO_OF_HOST_ARRAYS
+         if (nv(a) == 0) cycle
+         e1 = 1
+         do while (e1 <= nelem)
+            e2 = e1
+            do while (e2 < nelem)
+               if (nv(a) * (first(e2 + 2) - first(e1)) > slot) exit
+               e2 = e2 + 1
+            end do
+            if (slotArray(s) /= 0) call HexMesh_HostArraysUnpack(self, slotArray(s), slotFirst(s), slotLast(s), &
+                                                                 nv(slotArray(s)), (s - 1) * slot, QUEUES(s))
+            call HexMesh_HostArraysPack(self, a, e1, e2, nv(a), (s - 1) * slot, QUEUES(s))
+            slotArray(s) = a ; slotFirst(s) = e1 ; slotLast(s) = e2
+            s = 3 - s
+            e1 = e2 + 1
+         end do
+      end do
+      do n = 1, 2
+         if (slotArray(s) /= 0) call HexMesh_HostArraysUnpack(self, slotArray(s), slotFirst(s), slotLast(s), &
+                                                              nv(slotArray(s)), (s - 1) * slot, QUEUES(s))
+         s = 3 - s
+      end do
+#endif
+
+   end subroutine HexMesh_UpdateHostArrays
+#ifdef _OPENACC
+
+   subroutine HexMesh_HostArraysPack(self, a, e1, e2, nv, offset, queue)
+!
+!     Pack array a of elements e1 to e2 (nv values per node) into the device staging buffer from offset, and
+!     send it to the page-locked one, on queue
+!
+      implicit none
+      !-----------------------------------------------------------
+      type(HexMesh)       :: self
+      integer, intent(in) :: a, e1, e2, nv, offset, queue
+      !-----------------------------------------------------------
+      integer :: eID, i, j, k, m, p, n, first1, istat
+      integer(kind=cuda_stream_kind) :: stream
+      !-----------------------------------------------------------
+
+      first1 = hostArraysFirst(e1)
+      n = nv * (hostArraysFirst(e2 + 1) - first1)
+
+      select case (a)
+      case (HOST_Q)
+         !$acc parallel loop gang present(self) async(queue)
+         do eID = e1, e2
+            !$acc loop vector collapse(3) private(p)
+            do k = 0, self % elements(eID) % Nxyz(3)
+               do j = 0, self % elements(eID) % Nxyz(2)
+                  do i = 0, self % elements(eID) % Nxyz(1)
+                     p = offset + nv * (hostArraysFirstDev(eID) - first1 + i + (self % elements(eID) % Nxyz(1) + 1) &
+                                                                           * (j + (self % elements(eID) % Nxyz(2) + 1) * k))
+                     !$acc loop seq
+                     do m = 1, nv
+                        hostArraysDev(p + m) = self % elements(eID) % storage % Q(m,i,j,k)
+                     end do
+                  end do
+               end do
+            end do
+         end do
+      case (HOST_QDOT)
+         !$acc parallel loop gang present(self) async(queue)
+         do eID = e1, e2
+            !$acc loop vector collapse(3) private(p)
+            do k = 0, self % elements(eID) % Nxyz(3)
+               do j = 0, self % elements(eID) % Nxyz(2)
+                  do i = 0, self % elements(eID) % Nxyz(1)
+                     p = offset + nv * (hostArraysFirstDev(eID) - first1 + i + (self % elements(eID) % Nxyz(1) + 1) &
+                                                                           * (j + (self % elements(eID) % Nxyz(2) + 1) * k))
+                     !$acc loop seq
+                     do m = 1, nv
+                        hostArraysDev(p + m) = self % elements(eID) % storage % QDot(m,i,j,k)
+                     end do
+                  end do
+               end do
+            end do
+         end do
+      case (HOST_U_X)
+         !$acc parallel loop gang present(self) async(queue)
+         do eID = e1, e2
+            !$acc loop vector collapse(3) private(p)
+            do k = 0, self % elements(eID) % Nxyz(3)
+               do j = 0, self % elements(eID) % Nxyz(2)
+                  do i = 0, self % elements(eID) % Nxyz(1)
+                     p = offset + nv * (hostArraysFirstDev(eID) - first1 + i + (self % elements(eID) % Nxyz(1) + 1) &
+                                                                           * (j + (self % elements(eID) % Nxyz(2) + 1) * k))
+                     !$acc loop seq
+                     do m = 1, nv
+                        hostArraysDev(p + m) = self % elements(eID) % storage % U_x(m,i,j,k)
+                     end do
+                  end do
+               end do
+            end do
+         end do
+      case (HOST_U_Y)
+         !$acc parallel loop gang present(self) async(queue)
+         do eID = e1, e2
+            !$acc loop vector collapse(3) private(p)
+            do k = 0, self % elements(eID) % Nxyz(3)
+               do j = 0, self % elements(eID) % Nxyz(2)
+                  do i = 0, self % elements(eID) % Nxyz(1)
+                     p = offset + nv * (hostArraysFirstDev(eID) - first1 + i + (self % elements(eID) % Nxyz(1) + 1) &
+                                                                           * (j + (self % elements(eID) % Nxyz(2) + 1) * k))
+                     !$acc loop seq
+                     do m = 1, nv
+                        hostArraysDev(p + m) = self % elements(eID) % storage % U_y(m,i,j,k)
+                     end do
+                  end do
+               end do
+            end do
+         end do
+      case (HOST_U_Z)
+         !$acc parallel loop gang present(self) async(queue)
+         do eID = e1, e2
+            !$acc loop vector collapse(3) private(p)
+            do k = 0, self % elements(eID) % Nxyz(3)
+               do j = 0, self % elements(eID) % Nxyz(2)
+                  do i = 0, self % elements(eID) % Nxyz(1)
+                     p = offset + nv * (hostArraysFirstDev(eID) - first1 + i + (self % elements(eID) % Nxyz(1) + 1) &
+                                                                           * (j + (self % elements(eID) % Nxyz(2) + 1) * k))
+                     !$acc loop seq
+                     do m = 1, nv
+                        hostArraysDev(p + m) = self % elements(eID) % storage % U_z(m,i,j,k)
+                     end do
+                  end do
+               end do
+            end do
+         end do
+      case (HOST_MU_NS)
+         !$acc parallel loop gang present(self) async(queue)
+         do eID = e1, e2
+            !$acc loop vector collapse(3) private(p)
+            do k = 0, self % elements(eID) % Nxyz(3)
+               do j = 0, self % elements(eID) % Nxyz(2)
+                  do i = 0, self % elements(eID) % Nxyz(1)
+                     p = offset + nv * (hostArraysFirstDev(eID) - first1 + i + (self % elements(eID) % Nxyz(1) + 1) &
+                                                                           * (j + (self % elements(eID) % Nxyz(2) + 1) * k))
+                     !$acc loop seq
+                     do m = 1, nv
+                        hostArraysDev(p + m) = self % elements(eID) % storage % mu_NS(m,i,j,k)
+                     end do
+                  end do
+               end do
+            end do
+         end do
+      case (HOST_MU_TURB_NS)
+         !$acc parallel loop gang present(self) async(queue)
+         do eID = e1, e2
+            !$acc loop vector collapse(3) private(p)
+            do k = 0, self % elements(eID) % Nxyz(3)
+               do j = 0, self % elements(eID) % Nxyz(2)
+                  do i = 0, self % elements(eID) % Nxyz(1)
+                     p = offset + nv * (hostArraysFirstDev(eID) - first1 + i + (self % elements(eID) % Nxyz(1) + 1) &
+                                                                           * (j + (self % elements(eID) % Nxyz(2) + 1) * k))
+                     hostArraysDev(p + 1) = self % elements(eID) % storage % mu_turb_NS(i,j,k)
+                  end do
+               end do
+            end do
+         end do
+#ifdef CAHNHILLIARD
+      case (HOST_MU)
+         !$acc parallel loop gang present(self) async(queue)
+         do eID = e1, e2
+            !$acc loop vector collapse(3) private(p)
+            do k = 0, self % elements(eID) % Nxyz(3)
+               do j = 0, self % elements(eID) % Nxyz(2)
+                  do i = 0, self % elements(eID) % Nxyz(1)
+                     p = offset + nv * (hostArraysFirstDev(eID) - first1 + i + (self % elements(eID) % Nxyz(1) + 1) &
+                                                                           * (j + (self % elements(eID) % Nxyz(2) + 1) * k))
+                     !$acc loop seq
+                     do m = 1, nv
+                        hostArraysDev(p + m) = self % elements(eID) % storage % mu(m,i,j,k)
+                     end do
+                  end do
+               end do
+            end do
+         end do
+#endif
+      end select
+
+      stream = acc_get_cuda_stream(queue)
+      istat = cudaMemcpyAsync(hostArraysPinned(offset + 1 : offset + n), hostArraysDev(offset + 1 : offset + n), n, stream)
+      if (istat /= cudaSuccess) error stop "HexMesh_HostArraysPack: cudaMemcpyAsync failed"
+
+   end subroutine HexMesh_HostArraysPack
+
+   subroutine HexMesh_HostArraysUnpack(self, a, e1, e2, nv, offset, queue)
+!
+!     Wait for queue and copy array a of elements e1 to e2 (nv values per node) from the page-locked staging
+!     buffer, from offset, into the elements
+!
+      implicit none
+      !-----------------------------------------------------------
+      type(HexMesh)       :: self
+      integer, intent(in) :: a, e1, e2, nv, offset, queue
+      !-----------------------------------------------------------
+      integer :: eID, p, n, istat
+      integer(kind=cuda_stream_kind) :: stream
+      !-----------------------------------------------------------
+
+      stream = acc_get_cuda_stream(queue)
+      istat = cudaStreamSynchronize(stream)
+      if (istat /= cudaSuccess) error stop "HexMesh_HostArraysUnpack: cudaStreamSynchronize failed"
+
+      do eID = e1, e2
+         p = offset + nv * (hostArraysFirst(eID) - hostArraysFirst(e1))
+         n = nv * (hostArraysFirst(eID + 1) - hostArraysFirst(eID))
+         associate (st => self % elements(eID) % storage)
+         select case (a)
+         case (HOST_Q)          ; call HostArraysCopy(n, hostArraysPinned(p + 1), st % Q)
+         case (HOST_QDOT)       ; call HostArraysCopy(n, hostArraysPinned(p + 1), st % QDot)
+         case (HOST_U_X)        ; call HostArraysCopy(n, hostArraysPinned(p + 1), st % U_x)
+         case (HOST_U_Y)        ; call HostArraysCopy(n, hostArraysPinned(p + 1), st % U_y)
+         case (HOST_U_Z)        ; call HostArraysCopy(n, hostArraysPinned(p + 1), st % U_z)
+         case (HOST_MU_NS)      ; call HostArraysCopy(n, hostArraysPinned(p + 1), st % mu_NS)
+         case (HOST_MU_TURB_NS) ; call HostArraysCopy(n, hostArraysPinned(p + 1), st % mu_turb_NS)
+#ifdef CAHNHILLIARD
+         case (HOST_MU)         ; call HostArraysCopy(n, hostArraysPinned(p + 1), st % mu)
+#endif
+         end select
+         end associate
+      end do
+
+   end subroutine HexMesh_HostArraysUnpack
+
+   subroutine HostArraysCopy(n, from, to)
+      implicit none
+      integer,       intent(in)  :: n
+      real(kind=RP), intent(in)  :: from(n)
+      real(kind=RP), intent(out) :: to(n)
+      to = from
+   end subroutine HostArraysCopy
+#endif
+
+   subroutine HexMesh_UpdateHostArraysByElement(self, arrays)
+!
+!     HexMesh_UpdateHostArrays element by element: each element's array in an asynchronous update, with one
+!     wait at the end
+!
+      implicit none
+      !-----------------------------------------------------------
+      class(HexMesh), intent(inout) :: self
+      logical,        intent(in)    :: arrays(NO_OF_HOST_ARRAYS)
+      !-----------------------------------------------------------
+      integer :: eID
+      !-----------------------------------------------------------
+
+      !$acc wait
+
+      do eID = 1, size(self % elements)
+         if (arrays(HOST_Q)) then
+            !$acc update self(self % elements(eID) % storage % Q) async(1)
+         end if
+         if (arrays(HOST_QDOT)) then
+            !$acc update self(self % elements(eID) % storage % QDot) async(1)
+         end if
+         if (arrays(HOST_U_X) .and. associated(self % elements(eID) % storage % U_x)) then
+            !$acc update self(self % elements(eID) % storage % U_x) async(1)
+         end if
+         if (arrays(HOST_U_Y) .and. associated(self % elements(eID) % storage % U_y)) then
+            !$acc update self(self % elements(eID) % storage % U_y) async(1)
+         end if
+         if (arrays(HOST_U_Z) .and. associated(self % elements(eID) % storage % U_z)) then
+            !$acc update self(self % elements(eID) % storage % U_z) async(1)
+         end if
+         if (arrays(HOST_MU_NS)) then
+            !$acc update self(self % elements(eID) % storage % mu_ns) async(1)
+         end if
+         if (arrays(HOST_MU_TURB_NS)) then
+            !$acc update self(self % elements(eID) % storage % mu_turb_NS) async(1)
+         end if
+#ifdef CAHNHILLIARD
+         if (arrays(HOST_MU)) then
+            !$acc update self(self % elements(eID) % storage % mu) async(1)
+         end if
+#endif
+      end do
+
+      !$acc wait(1)
+
+   end subroutine HexMesh_UpdateHostArraysByElement
 
    subroutine HexMesh_UpdateFacesHostData(self)
       use Physics
